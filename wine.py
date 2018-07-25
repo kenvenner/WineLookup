@@ -8,7 +8,7 @@ import datetime
 import sys
 
 # appversion
-appversion = '1.04'
+appversion = '1.08'
 
 # global variable - rundate set at strat
 datefmt = '%m/%d/%Y'
@@ -170,6 +170,20 @@ def save_wines_to_file(file, srchstring, winelist):
         print ('save_wines_to_file:', srchstring, ':completed')
                 
 # ---------------------------------------------------------------------------
+
+# dump out an HTML element additional data
+def print_html_elem( msg, index, elem):
+    print ('-----------------------------------------')
+    print ('index:', index)
+    print (msg, ' class:', elem.get_attribute('class'))
+    print (msg, ' type:', elem.get_attribute('type'))
+    print (msg, ' id:', elem.get_attribute('id'))
+    print (msg, ' parentElement:', elem.get_attribute('parentElement'))
+    print (msg, ' outerHTML:', elem.get_attribute('outerHTML'))
+    print (msg, ' text:', elem.get_attribute('text'))
+
+
+
 # -----------------------------------------------------------------------
 
 #### BEVMO ####
@@ -316,7 +330,7 @@ def create_bevmo_selenium_driver(defaultstore):
         time.sleep(5)
         
     # print out that we found it
-    print ('found the storeselect-popup')
+    print ('bevmo_driver:found the storeselect-popup')
         
     # see if the icon is visibile - if true we need to process this screen
     if driver.find_element_by_xpath('//*[@id="storeselect-popup"]/div[1]/img').is_displayed():
@@ -416,7 +430,7 @@ def totalwine_search( srchsring, totalwine_driver ):
         # check to see if we have looped to many times
         if loopcnt > 10:
             print('totalwine_search:looped too many times - exiting program')
-            sys.exit()
+            sys.exit(1)
 
     # check to see if we got no results
     if returned_recs == 0:
@@ -440,6 +454,11 @@ def totalwine_search( srchsring, totalwine_driver ):
 
     # debugging
     # print ('pricelist:', pricelist)
+
+    # message we have a problem
+    if len(titlelist) != len(pricelist):
+        print('totalwine_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+
     
     # now loop through the wines we found
     for index in range(len(pricelist)):
@@ -562,6 +581,10 @@ def wineclub_search( srchsring, wineclub_driver ):
     titlelist = wineclub_driver.find_elements_by_class_name('product-name')
     pricelist = wineclub_driver.find_elements_by_class_name('regular-price')
 
+    # message we have a problem
+    if len(titlelist) != len(pricelist):
+        print('wineclub_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+
     # debugging
     if verbose > 5:
         print ('wineclub_search:pricelist:', pricelist)
@@ -585,7 +608,7 @@ def create_wineclub_selenium_driver(defaultzip):
     # debugging
     if verbose > 0:
         print('wineclub_driver:start:---------------------------------------------------')
-        print ("Start up webdriver.Chrome")
+        print ("wineclub:Start up webdriver.Chrome")
     
     # Using Chrome to access web
     driver = webdriver.Chrome()
@@ -622,6 +645,26 @@ def create_wineclub_selenium_driver(defaultzip):
 # --------------------------------------------------------------------------
 
 #### HITIME ####
+
+# check to see if we want to keep this price element
+def hitimes_price_elem_include( msg, price ):
+    
+    # do regex and skip old price entries
+    if re.search('old-price', price.get_attribute('id')):
+        # debugging
+        if verbose > 4:
+            print('hitime_search:old-price-throw away')
+        return False
+    elif re.search('\-related', price.get_attribute('id')):
+        # debugging
+        if verbose > 4:
+            print('hitime_search:-related-throw away')
+        return False
+    else:
+        # debugging
+        if verbose > 4:
+            print('hitime_search:keep-this-price:',  price.get_attribute('id'))
+        return True
 
 
 # function used to extract the data from the DOM that was returned
@@ -664,7 +707,6 @@ def hitime_search( srchsring, hitime_driver ):
     # check to see how many results we got back
     try:
         returned_results = hitime_driver.find_elements_by_class_name('empty-catalog')
-        print('hitime_search:found-empty-catalog-results:len:', len(returned_results))
         if (len(returned_results) > 0):
             print('hitime_search:found-empty-catalog-text:', returned_results[0].text)
             # debugging
@@ -673,17 +715,104 @@ def hitime_search( srchsring, hitime_driver ):
             hitime_driver.get('https://hitimewine.net')
             # return no results
             return [{ 'wine_store' : 'HiTimes', 'wine_name' : srchstring + ' - no results found', 'wine_price' : 0 }]            
+        else:
+            # debugging
+            if verbose > 1:
+                print('hitime_search:found-empty-catalog-results:len:', len(returned_results))
+
     except NoSuchElementException:
         print ('hitime_search:empty-catalog:object not found')
         
     # get results back and look for the thing we are looking for - the list of things we are going to process
     titlelist = hitime_driver.find_elements_by_class_name('product-name')
-    pricelist = hitime_driver.find_elements_by_class_name('price')
+    pricelistraw = hitime_driver.find_elements_by_class_name('price')
+    pricelistreg = hitime_driver.find_elements_by_class_name('regular-price')
+
+    
+    # we need to attempt to filter down this list
+    index = 0
+    for title in titlelist:
+        # debugging
+        if verbose > 5: 
+            print_html_elem( 'hitimes_search:title', index, title )
+        # increment the index
+        index += 1
+
+    # RAW filter out of this list any "old" price entries
+    index = 0
+    pricelistrawfiltered = []
+    if len(pricelistraw) > len(titlelist):
+        # not the same size - so filter down
+        for price in pricelistraw:
+            # debugging
+            if verbose > 4:
+                print_html_elem( 'hitimes_search:raw price', index, price )
+
+            # increment the counter
+            index += 1
+            # determine if we are keeping this item
+            if hitimes_price_elem_include( 'hitimes_search:reg:', price):
+                # keep this price
+                pricelistrawfiltered.append(price)
+
+    # price is not greater than title list - see if they are the same - if they are - set it
+    elif len(titlelist) == len(pricelistraw):
+        # debugging
+        if verbose > 0:
+            print('hitime_search:price-raw-same-length-just-copy-over')
+        pricelistrawfiltered = pricelistraw
+
+    # REG filter out of this list any "old" price entries
+    index = 0
+    pricelistregfiltered = []
+    if len(pricelistreg) > len(titlelist):
+        # we need to attempt to filter down this list
+        for price in pricelistreg:
+            # debugging
+            if verbose > 4:
+                print_html_elem( 'hitimes_search:reg price', index, price )
+
+            # increment the counter
+            index += 1
+            # determine if we are keeping this item
+            if hitimes_price_elem_include( 'hitimes_search:reg:', price):
+                # keep this price
+                pricelistregfiltered.append(price)
+    # price is not greater than title list - see if they are the same - if they are - set it
+    elif len(titlelist) == len(pricelistreg):
+        # debugging
+        if verbose > 4:
+            print('hitime_search:price-regular-same-length-just-copy-over')
+        pricelistregfiltered = pricelistreg
+
+    # debugging
+    if verbose > 4:
+        print('len titlelist:', len(titlelist))
+        print('len pricelistraw:', len(pricelistraw))
+        print('len pricelistreg:', len(pricelistreg))
+        print('len pricelistrawfiltered:', len(pricelistrawfiltered))
+        print('len pricelistregfiltered:', len(pricelistregfiltered))
 
     # debugging
     print('hitime_search:returned records:',  len(titlelist))
 
-    
+    # message we have a problem
+    if len(titlelist) == len(pricelistrawfiltered):
+        if verbose > 4:
+            print('hitimes_search:pricelistrawfiltered')
+        pricelist = pricelistrawfiltered
+    elif len(titlelist) == 1 and len(pricelistrawfiltered) > 1:
+        if verbose > 4:
+            print('hitimes_search:pricelistrawfiltered:one-wine')
+        pricelist = pricelistrawfiltered
+    elif len(titlelist) == len(pricelistregfiltered):
+        if verbose > 4:
+            print('hitimes_search:pricelistregfiltered')
+        pricelist = pricelistregfiltered
+    else:
+        print('hitime_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        pricelist = pricelistrawfiltered
+
     # now loop through the wines we found
     for index in range(len(titlelist)):
         found_wines.append( hitime_extract_wine_from_DOM(index,titlelist,pricelist) )
@@ -700,7 +829,7 @@ def create_hitime_selenium_driver(defaultzip):
     # debugging
     if verbose > 0:
         print('hitime_driver:start:---------------------------------------------------')
-        print ("Start up webdriver.Chrome")
+        print('hitime_driver:Start up webdriver.Chrome')
     
     # Using Chrome to access web
     driver = webdriver.Chrome()
@@ -725,7 +854,7 @@ def create_hitime_selenium_driver(defaultzip):
             # increment the counter
             loopcnt += 1
             # debugging
-            print('hitime_driver:wait 1 second for the object to be displayed:', loopcnt)
+            print('hitime_driver:wait 1 second for the object to be displayed-loopcnt:', loopcnt)
             # sleep
             time.sleep(1)
 
@@ -797,12 +926,20 @@ def wally_search( srchsring, wally_driver ):
     pricelist = wally_driver.find_elements_by_class_name('price-box')
 
     # debugging
+    print('wally_search:returned records:',  len(pricelist))
+    
+    # debugging
     if verbose > 5:
         print ('wally_search:pricelist:', pricelist)
 
-    # debugging
-    print('wally_search:returned records:',  len(pricelist))
-    
+    # message we have a problem
+    if len(titlelist) != len(pricelist):
+        print('wally_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        # check to see if we don't have enough titles for prices
+        if len(titlelist) < len(pricelist):
+            print('wally_search:must exit because titles are less than prices')
+            sys.exit(1)
+
     # now loop through the wines we found
     for index in range(len(pricelist)):
         found_wines.append( wally_extract_wine_from_DOM(index,titlelist,pricelist) )
@@ -866,7 +1003,7 @@ def pavillions_search( srchsring, pavillions_driver ):
     if not search_box.is_displayed():
         # debugging
         print ('pavillions_search:search box is not displayed - this is a problem - exit')
-        sys.exit()
+        sys.exit(1)
 
     # debugging
     print ('pavillions_search:search for:', srchstring, ' in wines')
@@ -924,12 +1061,16 @@ def pavillions_search( srchsring, pavillions_driver ):
         print ('pavillions_search:type:', type(e))
         print ('pavillions_search:args:', e.args)
         print ('pavillions_search:exit and debug why we did not get back searchNrResults')
-        sys.exit()
+        sys.exit(1)
         time.sleep(30)
 
     # get results back and look for the thing we are looking for - the list of things we are going to process
     titlelist = pavillions_driver.find_elements_by_class_name('product-title')
     pricelist = pavillions_driver.find_elements_by_class_name('product-price')
+
+    # message we have a problem
+    if len(titlelist) != len(pricelist):
+        print('pavillions_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
 
     # debugging
     if verbose > 5:
@@ -979,7 +1120,7 @@ def create_pavillions_selenium_driver(defaultzip):
             zipcode_box.send_keys(Keys.RETURN)
 
             # debugging
-            print ('zipcode populated')
+            print ('pavillions_driver:zipcode populated')
             
             # pause to give time for the search page to show
             timewait = 2
@@ -1001,6 +1142,10 @@ def create_pavillions_selenium_driver(defaultzip):
 
 # ---------------------------------------------------------------------------
 
+# dump out what we have done here
+if verbose > 0:
+    print ('---------------STARTUP---------------------------')
+
 # define the store list - all the stores we COULD process
 storelist = [
     'bevmo',
@@ -1013,6 +1158,7 @@ storelist = [
 
 # uncomment this line if you want to limit the number of stores you are working
 #storelist = ['wally']
+#storelist = ['hitime']
 
 # srchstring - set at None - then we will look up the information from the file
 srchstring_list = None
@@ -1026,6 +1172,9 @@ srchstring_list = None
 #srchstring_list = ['silver oak']
 #srchstring_list = ['macallan']
 #srchstring_list = ['attune']
+#srchstring_list = ['richard']
+#srchstring_list = ['arista','richard','richard cognac']
+#srchstring_list = ['kosta']
 
 # if not user defined - generate the list if we don't have one predefined
 if srchstring_list == None:
@@ -1079,6 +1228,7 @@ for srchstring in srchstring_list:
     print ('wine.py:', srchstring, ' count of wines found:', len(found_wines))
     # call the print routine
     save_wines_to_file(wineoutfile, srchstring, found_wines)
+
 
 # close the browser we open when we are all done.
 if 'bevmo' in storelist:
