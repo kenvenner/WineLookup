@@ -8,7 +8,7 @@ import datetime
 import sys
 
 # appversion
-appversion = '1.06'
+appversion = '1.08'
 
 # global variable - rundate set at strat
 datefmt = '%m/%d/%Y'
@@ -430,7 +430,7 @@ def totalwine_search( srchsring, totalwine_driver ):
         # check to see if we have looped to many times
         if loopcnt > 10:
             print('totalwine_search:looped too many times - exiting program')
-            sys.exit()
+            sys.exit(1)
 
     # check to see if we got no results
     if returned_recs == 0:
@@ -608,7 +608,7 @@ def create_wineclub_selenium_driver(defaultzip):
     # debugging
     if verbose > 0:
         print('wineclub_driver:start:---------------------------------------------------')
-        print ("Start up webdriver.Chrome")
+        print ("wineclub:Start up webdriver.Chrome")
     
     # Using Chrome to access web
     driver = webdriver.Chrome()
@@ -925,17 +925,21 @@ def wally_search( srchsring, wally_driver ):
     titlelist = wally_driver.find_elements_by_class_name('product-name')
     pricelist = wally_driver.find_elements_by_class_name('price-box')
 
-    # message we have a problem
-    if len(titlelist) != len(pricelist):
-        print('wally_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
-
+    # debugging
+    print('wally_search:returned records:',  len(pricelist))
+    
     # debugging
     if verbose > 5:
         print ('wally_search:pricelist:', pricelist)
 
-    # debugging
-    print('wally_search:returned records:',  len(pricelist))
-    
+    # message we have a problem
+    if len(titlelist) != len(pricelist):
+        print('wally_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        # check to see if we don't have enough titles for prices
+        if len(titlelist) < len(pricelist):
+            print('wally_search:must exit because titles are less than prices')
+            sys.exit(1)
+
     # now loop through the wines we found
     for index in range(len(pricelist)):
         found_wines.append( wally_extract_wine_from_DOM(index,titlelist,pricelist) )
@@ -999,7 +1003,7 @@ def pavillions_search( srchsring, pavillions_driver ):
     if not search_box.is_displayed():
         # debugging
         print ('pavillions_search:search box is not displayed - this is a problem - exit')
-        sys.exit()
+        sys.exit(1)
 
     # debugging
     print ('pavillions_search:search for:', srchstring, ' in wines')
@@ -1057,7 +1061,7 @@ def pavillions_search( srchsring, pavillions_driver ):
         print ('pavillions_search:type:', type(e))
         print ('pavillions_search:args:', e.args)
         print ('pavillions_search:exit and debug why we did not get back searchNrResults')
-        sys.exit()
+        sys.exit(1)
         time.sleep(30)
 
     # get results back and look for the thing we are looking for - the list of things we are going to process
@@ -1138,6 +1142,10 @@ def create_pavillions_selenium_driver(defaultzip):
 
 # ---------------------------------------------------------------------------
 
+# dump out what we have done here
+if verbose > 0:
+    print ('---------------STARTUP---------------------------')
+
 # define the store list - all the stores we COULD process
 storelist = [
     'bevmo',
@@ -1166,6 +1174,7 @@ srchstring_list = None
 #srchstring_list = ['attune']
 #srchstring_list = ['richard']
 #srchstring_list = ['arista','richard','richard cognac']
+#srchstring_list = ['kosta']
 
 # if not user defined - generate the list if we don't have one predefined
 if srchstring_list == None:
