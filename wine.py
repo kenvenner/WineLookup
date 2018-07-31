@@ -8,7 +8,7 @@ import datetime
 import sys
 
 # appversion
-appversion = '1.08'
+appversion = '1.12'
 
 # global variable - rundate set at strat
 datefmt = '%m/%d/%Y'
@@ -183,6 +183,15 @@ def print_html_elem( msg, index, elem):
     print (msg, ' text:', elem.get_attribute('text'))
 
 
+# exit application with error code
+def exitWithError( msg ):
+    # display optional message
+    if msg:
+        print(msg)
+
+    # display that we terminated and then terminate
+    print('TERMINATE')
+    sys.exit(1)
 
 # -----------------------------------------------------------------------
 
@@ -226,6 +235,11 @@ def bevmo_search( srchsring, bevmo_driver ):
     # Select the search box(es) and find if any are visbile - there can be more than one returned value
     search_boxes = bevmo_driver.find_elements_by_name('w')
 
+    # debugging
+    if len(search_boxes) == 0:
+        print('bevmo_search:number of search_boxes:', len(search_boxes))
+        exitWithError()
+
     # search the returned boxes to see if any are visible
     for index in range(len(search_boxes)):
         search_box = search_boxes[index]
@@ -258,9 +272,10 @@ def bevmo_search( srchsring, bevmo_driver ):
     # create the array that we will add to
     found_wines = []
 
-    # put a minor pause
+    # debugging
     if verbose > 0:
         print ('bevmo_search:pause 0.5 sec to allow page to fill in')
+    # put a minor pause
     time.sleep(0.5)
 
     # first test - see if we got no results found - if so return the empty array
@@ -278,13 +293,18 @@ def bevmo_search( srchsring, bevmo_driver ):
             if verbose > 1:
                 print('bevmo_search:did not error when searching for sli_noresult:' + srchstring)
     except NoSuchElementException:
+        # debugging
         if verbose > 1:
             print ('bevmo_search:sli_noresults does not exist - there must be results')
+    except NoSuchWindowException as e:
+        print ('bevmo_search:window unexpectantly closed - error:', str(e))
+        exitWithError()
     except  Exception as e:
         print ('bevmo_search:sli_noresults - not found for (' + srchstring + ') - results were found (expected) - error:', str(e))
         print ('bevmo_search:type:', type(e))
         print ('bevmo_search:args:', e.args)
-
+        print ('bevmo_search:exiting program due to error')
+        exitWithError()
 
     # get results back and look for the thing we are looking for - the list of things we are going to process
     winelist = bevmo_driver.find_elements_by_class_name('product-info')
@@ -325,10 +345,33 @@ def create_bevmo_selenium_driver(defaultstore):
     time.sleep(timewait)
     
     # test to see if we have store selection dialogue here
-    while not driver.find_element_by_xpath('//*[@id="storeselect-popup"]/div[1]/img'):
-        print ('bevmo_driver:did not find the storeselect-popup - waiting 5 seconds')
-        time.sleep(5)
-        
+    loopcnt = 1
+    maxloopcnt = 6
+    popupfound = 0
+    while loopcnt < maxloopcnt and not popupfound:
+        # put in a try/catch loop - to deal with the case where a page is not returned
+        try:
+            # try to get the element
+            popupfound = driver.find_element_by_xpath('//*[@id="storeselect-popup"]/div[1]/img')
+            # found it - set the loop count to max loop count
+            loopcnt = maxloopcnt
+        except:
+            # did not find it - set flag and increment loop count
+            popupfound = 0
+            loopcnt += 1
+            # display message and sleep
+            print ('bevmo_driver:did not find the storeselect-popup - waiting 5 seconds')
+            time.sleep(5)
+
+    # check to see if we found the popup
+    if not popupfound:
+        # exit this driver
+        driver.quit()
+        # message to user
+        print('bevmo_drive:could not find the page - disabling bevmo site')
+        # return value to not use this website
+        return None
+            
     # print out that we found it
     print ('bevmo_driver:found the storeselect-popup')
         
@@ -422,6 +465,9 @@ def totalwine_search( srchsring, totalwine_driver ):
                 print('totalwine_search:pause 0.5 sec (again) to allow the page to fill in')
                 time.sleep(0.5)
                 loopcnt += 1
+        except TimeoutException as e:
+            print('totalwine_search:browser timeout error - exit program - error message:', str(e))
+            exitWithError()
         except  Exception as e:
             print('totalwine_search:exception on search for anProdCount:error-string:', str(e))
             time.sleep(0.5)
@@ -430,7 +476,7 @@ def totalwine_search( srchsring, totalwine_driver ):
         # check to see if we have looped to many times
         if loopcnt > 10:
             print('totalwine_search:looped too many times - exiting program')
-            sys.exit(1)
+            exitWithError()
 
     # check to see if we got no results
     if returned_recs == 0:
@@ -477,7 +523,7 @@ def totalwine_search( srchsring, totalwine_driver ):
     # return the wines we found
     return found_wines
 
-# function to create a selenium driver for bevmo and get past the store selector
+# function to create a selenium driver for totalwine and get past age question
 def create_totalwine_selenium_driver(defaultstore):
     # debugging
     if verbose > 0:
@@ -603,7 +649,7 @@ def wineclub_search( srchsring, wineclub_driver ):
     # return the wines we found
     return found_wines
 
-# function to create a selenium driver for bevmo and get past the store selector
+# function to create a selenium driver for wineclub and get past popup
 def create_wineclub_selenium_driver(defaultzip):
     # debugging
     if verbose > 0:
@@ -824,7 +870,7 @@ def hitime_search( srchsring, hitime_driver ):
     # return the wines we found
     return found_wines
 
-# function to create a selenium driver for bevmo and get past the store selector
+# function to create a selenium driver for hitime and get past the close link
 def create_hitime_selenium_driver(defaultzip):
     # debugging
     if verbose > 0:
@@ -938,7 +984,7 @@ def wally_search( srchsring, wally_driver ):
         # check to see if we don't have enough titles for prices
         if len(titlelist) < len(pricelist):
             print('wally_search:must exit because titles are less than prices')
-            sys.exit(1)
+            exitWithError()
 
     # now loop through the wines we found
     for index in range(len(pricelist)):
@@ -951,7 +997,7 @@ def wally_search( srchsring, wally_driver ):
     # return the wines we found
     return found_wines
 
-# function to create a selenium driver for bevmo and get past the store selector
+# function to create a selenium driver for wallys
 def create_wally_selenium_driver(defaultzip):
     # debugging
     if verbose > 0:
@@ -1003,66 +1049,7 @@ def pavillions_search( srchsring, pavillions_driver ):
     if not search_box.is_displayed():
         # debugging
         print ('pavillions_search:search box is not displayed - this is a problem - exit')
-        sys.exit(1)
-
-    # debugging
-    print ('pavillions_search:search for:', srchstring, ' in wines')
-
-    # send in the string to this box and press RETURN
-    search_box.clear()
-    search_box.send_keys(srchstring + ' in wines')
-    search_box.send_keys(Keys.RETURN)
-    
-    # create the array that we will add to
-    found_wines = []
-    
-    # first test - see if we got no results found - if so return the empty array
-    try:
-        # see if we got a result string back - errors out if we did not
-        returned_result = pavillions_driver.find_element_by_xpath('//*[@id="searchNrResults"]')
-
-        # debugging
-        if 0:
-            print ('returned result object:', returned_result)
-            print ('returned result:', returned_result.text)
-            print ('returned result tag_name:', returned_result.tag_name)
-            print ('returned result parent:', returned_result.parent)
-            print ('returned result innerHTML:', returned_result.get_attribute('innerHTML'))
-            print ('returned result Text:', returned_result.get_attribute('text'))
-            print ('returned result innerText:', returned_result.get_attribute('innerText'))
-            print ('returned result textContext:', returned_result.get_attribute('textContext'))
-            print ('returned result value:', returned_result.get_attribute('value'))
-            print ('returned result ID:', returned_result.get_attribute('id'))
-            print ('returned result name:', returned_result.get_attribute('name'))
-            print ('returned result class:', returned_result.get_attribute('class'))
-            print ('returned result type:', returned_result.get_attribute('type'))
-            
-        # we must wait for the element to show
-        while not returned_result.text:
-            print ('pavillions_search:Waiting 1 second on result text to show')
-            time.sleep(1)
-            
-        # result text
-        result_text = returned_result.text
-
-        # now check to see if the answer was no result
-        if re.match('No results', result_text):
-            # debugging
-            print ('pavillions_search:', srchstring, ':no results returned - refresh the page we are looking at')
-            # update the website we are pointing at
-            pavillions_driver.get('https://shop.pavilions.com/home.html')
-            # return a record that says we could not find the record
-            return [{ 'wine_store' : 'Vons', 'wine_name' : srchstring + ' - no results found', 'wine_price' : 0 }]
-        else:
-            # debugging
-            print('pavillions_search:following found results:',  result_text)
-    except  Exception as e:
-        print ('pavillions_search:searchNrResults - not found for (' + srchstring + ') - result were found - error:', str(e))
-        print ('pavillions_search:type:', type(e))
-        print ('pavillions_search:args:', e.args)
-        print ('pavillions_search:exit and debug why we did not get back searchNrResults')
-        sys.exit(1)
-        time.sleep(30)
+        exitWithError()
 
     # get results back and look for the thing we are looking for - the list of things we are going to process
     titlelist = pavillions_driver.find_elements_by_class_name('product-title')
@@ -1087,7 +1074,7 @@ def pavillions_search( srchsring, pavillions_driver ):
     # return the wines we found
     return found_wines
 
-# function to create a selenium driver for bevmo and get past the store selector
+# function to create a selenium driver for pavillions and enter zipcode
 def create_pavillions_selenium_driver(defaultzip):
     # debugging
     if verbose > 0:
@@ -1144,7 +1131,7 @@ def create_pavillions_selenium_driver(defaultzip):
 
 # dump out what we have done here
 if verbose > 0:
-    print ('---------------STARTUP---------------------------')
+    print ('---------------STARTUP(', datetime.datetime.now().strftime('%Y%m%d:%T'), ')---------------------------')
 
 # define the store list - all the stores we COULD process
 storelist = [
@@ -1188,6 +1175,8 @@ store_wine_lookup = read_wine_xlat_file( winexlatfile )
 # create the bevmo selenium driver
 if 'bevmo' in storelist:
     bevmo_driver = create_bevmo_selenium_driver('Ladera Ranch')
+    # if we did not get a valid driver - then we are not using this store.
+    if bevmo_driver == None:  storelist.remove('bevmo')
 if 'pavillions' in storelist:
     pavillions_driver = create_pavillions_selenium_driver('92688')
 if 'wineclub' in storelist:
