@@ -8,7 +8,7 @@ import datetime
 import sys
 
 # appversion
-appversion = '1.12'
+appversion = '1.14'
 
 # global variable - rundate set at strat
 datefmt = '%m/%d/%Y'
@@ -282,7 +282,7 @@ def bevmo_search( srchsring, bevmo_driver ):
     try:
         if bevmo_driver.find_element_by_xpath('//*[@id="sli_noresult"]'):
             # debugging
-            if verbose > 1:
+            if verbose > 0:
                 print ('bevmo_search:', srchstring, ':no results returned - refresh the page we are looking at')
             # update the website we are pointing at
             bevmo_driver.get('https://www.bevmo.com')
@@ -459,15 +459,15 @@ def totalwine_search( srchsring, totalwine_driver ):
                 print('totalwine_search:exception on search for anProdCount:NoSuchElementException')
                 print('totalwine_search:now search for listCount')
                 returned_recs = totalwine_driver.find_element_by_id('listCount').get_attribute('value')
-            except  Exception as e:
+            except  Exception as f:
                 # did not find alternate attribute - now we have problem
-                print('totalwine_search:exception on search for listCount:', str(e))
+                print('totalwine_search:exception on search for listCount:', str(f))
                 print('totalwine_search:pause 0.5 sec (again) to allow the page to fill in')
                 time.sleep(0.5)
                 loopcnt += 1
-        except TimeoutException as e:
-            print('totalwine_search:browser timeout error - exit program - error message:', str(e))
-            exitWithError()
+        #except TimeoutException as e:
+        #    print('totalwine_search:browser timeout error - exit program - error message:', str(e))
+        #    exitWithError()
         except  Exception as e:
             print('totalwine_search:exception on search for anProdCount:error-string:', str(e))
             time.sleep(0.5)
@@ -1051,6 +1051,64 @@ def pavillions_search( srchsring, pavillions_driver ):
         print ('pavillions_search:search box is not displayed - this is a problem - exit')
         exitWithError()
 
+    # debugging
+    print ('pavillions_search:search for:', srchstring, ' in wines')
+
+    # send in the string to this box and press RETURN
+    search_box.clear()
+    search_box.send_keys(srchstring + ' in wines')
+    search_box.send_keys(Keys.RETURN)
+    
+    # create the array that we will add to
+    found_wines = []
+    
+    # first test - see if we got no results found - if so return the empty array
+    try:
+        # see if we got a result string back - errors out if we did not
+        returned_result = pavillions_driver.find_element_by_xpath('//*[@id="searchNrResults"]')
+
+        # debugging
+        if 0:
+            print ('returned result object:', returned_result)
+            print ('returned result:', returned_result.text)
+            print ('returned result tag_name:', returned_result.tag_name)
+            print ('returned result parent:', returned_result.parent)
+            print ('returned result innerHTML:', returned_result.get_attribute('innerHTML'))
+            print ('returned result Text:', returned_result.get_attribute('text'))
+            print ('returned result innerText:', returned_result.get_attribute('innerText'))
+            print ('returned result textContext:', returned_result.get_attribute('textContext'))
+            print ('returned result value:', returned_result.get_attribute('value'))
+            print ('returned result ID:', returned_result.get_attribute('id'))
+            print ('returned result name:', returned_result.get_attribute('name'))
+            print ('returned result class:', returned_result.get_attribute('class'))
+            print ('returned result type:', returned_result.get_attribute('type'))
+            
+        # we must wait for the element to show
+        while not returned_result.text:
+            print ('pavillions_search:Waiting 1 second on result text to show')
+            time.sleep(1)
+            
+        # result text
+        result_text = returned_result.text
+
+        # now check to see if the answer was no result
+        if re.match('No results', result_text):
+            # debugging
+            print ('pavillions_search:', srchstring, ':no results returned - refresh the page we are looking at')
+            # update the website we are pointing at
+            pavillions_driver.get('https://shop.pavilions.com/home.html')
+            # return a record that says we could not find the record
+            return [{ 'wine_store' : 'Vons', 'wine_name' : srchstring + ' - no results found', 'wine_price' : 0 }]
+        else:
+            # debugging
+            print('pavillions_search:following found results:',  result_text)
+    except  Exception as e:
+        print ('pavillions_search:searchNrResults - not found for (' + srchstring + ') - result were found - error:', str(e))
+        print ('pavillions_search:type:', type(e))
+        print ('pavillions_search:args:', e.args)
+        print ('pavillions_search:exit and debug why we did not get back searchNrResults')
+        exitWithError()
+
     # get results back and look for the thing we are looking for - the list of things we are going to process
     titlelist = pavillions_driver.find_elements_by_class_name('product-title')
     pricelist = pavillions_driver.find_elements_by_class_name('product-price')
@@ -1063,6 +1121,9 @@ def pavillions_search( srchsring, pavillions_driver ):
     if verbose > 5:
         print ('pavillions_search:pricelist:', pricelist)
     
+    # debugging
+    print('pavillions_search:returned records:',  len(pricelist))
+
     # now loop through the wines we found
     for index in range(len(pricelist)):
         found_wines.append( pavillions_extract_wine_from_DOM(index,titlelist,pricelist) )
@@ -1146,6 +1207,7 @@ storelist = [
 # uncomment this line if you want to limit the number of stores you are working
 #storelist = ['wally']
 #storelist = ['hitime']
+#storelist = ['pavillions']
 
 # srchstring - set at None - then we will look up the information from the file
 srchstring_list = None
@@ -1203,16 +1265,26 @@ for srchstring in srchstring_list:
     # find the wines for this search string
     if 'bevmo' in storelist:
         found_wines.extend( bevmo_search( srchstring, bevmo_driver ) )
+        # debugging
+        if verbose > 5: print ('wine.py:', srchstring, ' count of wines found:', len(found_wines))
     if 'pavillions' in storelist:
         found_wines.extend( pavillions_search( srchstring, pavillions_driver ) )
+        # debugging
+        if verbose > 5: print ('wine.py:', srchstring, ' count of wines found:', len(found_wines))
     if 'wineclub' in storelist:
         found_wines.extend( wineclub_search( srchstring, wineclub_driver ) )
+        # debugging
+        if verbose > 5: print ('wine.py:', srchstring, ' count of wines found:', len(found_wines))
     if 'totalwine' in storelist:
         found_wines.extend( totalwine_search( srchstring, totalwine_driver ) )
+        # debugging
+        if verbose > 5: print ('wine.py:', srchstring, ' count of wines found:', len(found_wines))
     if 'hitime' in storelist:
         found_wines.extend( hitime_search( srchstring, hitime_driver ) )
     if 'wally' in storelist:
         found_wines.extend( wally_search( srchstring, wally_driver ) )
+        # debugging
+        if verbose > 5: print ('wine.py:', srchstring, ' count of wines found:', len(found_wines))
     # debugging
     print ('wine.py:', srchstring, ' count of wines found:', len(found_wines))
     # call the print routine
