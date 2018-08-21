@@ -7,8 +7,10 @@ import re
 import datetime
 import sys
 
+# pavillions is NOT working in this version - it has been commented out
+
 # appversion
-appversion = '1.14'
+appversion = '1.15'
 
 # global variable - rundate set at strat
 datefmt = '%m/%d/%Y'
@@ -181,10 +183,11 @@ def print_html_elem( msg, index, elem):
     print (msg, ' parentElement:', elem.get_attribute('parentElement'))
     print (msg, ' outerHTML:', elem.get_attribute('outerHTML'))
     print (msg, ' text:', elem.get_attribute('text'))
+    print (msg, ' displayed:', elem.is_displayed())
 
 
 # exit application with error code
-def exitWithError( msg ):
+def exitWithError( msg='' ):
     # display optional message
     if msg:
         print(msg)
@@ -1042,13 +1045,28 @@ def pavillions_extract_wine_from_DOM(index,titlelist,pricelist):
 
 # Search for the wine
 def pavillions_search( srchsring, pavillions_driver ):
+
+    # /html/body/div[1]/div/div/div[1]/div/div/div/div/div[1]/div[4]/form/div/div/input
+
     # Select the search box(es) and find if any are visbile - there can be more than one returned value
-    search_box = pavillions_driver.find_element_by_xpath('//*[@id="ecomm-search"]')
+    # search_box = pavillions_driver.find_element_by_xpath('//*[@id="ecomm-search"]')
+    # search_box = pavillions_driver.find_element_by_name('q')
+    search_box = pavillions_driver.find_element_by_id('inputSearch')
+
+    # debugging
+    print('pavillions_search:search_box:', search_box)
 
     # first check to see that the search box is displayed - if not visible then click the bottom that makes it visible
     if not search_box.is_displayed():
         # debugging
         print ('pavillions_search:search box is not displayed - this is a problem - exit')
+        print_html_elem('pavillions_search:search_box:', 0, search_box)
+        search_box.click()
+
+    if not search_box.is_displayed():
+        # debugging
+        print ('pavillions_search:search box 2 is not displayed - this is a problem - exit')
+        print_html_elem('pavillions_search:search_box2:', 0, search_box)
         exitWithError()
 
     # debugging
@@ -1198,7 +1216,7 @@ if verbose > 0:
 storelist = [
     'bevmo',
     'hitime',
-    'pavillions',
+#    'pavillions',
     'totalwine',
     'wineclub',
     'wally',
