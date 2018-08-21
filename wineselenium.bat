@@ -1,4 +1,8 @@
 REM run the Selenium based tool that pulls new data down from websites
+REM 
+REM clear the log file
+del wineselenium.log
+del wineselenium-err.log
 REM
 REM Message that we are past this point in an email
 sendgmail subject_adder=" - wineselenium STARTED"
