@@ -10,7 +10,7 @@ import sys
 # pavillions is NOT working in this version - it has been commented out
 
 # appversion
-appversion = '1.16'
+appversion = '1.18'
 
 # global variable - rundate set at strat
 datefmt = '%m/%d/%Y'
@@ -774,98 +774,30 @@ def hitime_search( srchsring, hitime_driver ):
         print ('hitime_search:empty-catalog:object not found')
         
     # get results back and look for the thing we are looking for - the list of things we are going to process
-    titlelist = hitime_driver.find_elements_by_class_name('product-name')
-    pricelistraw = hitime_driver.find_elements_by_class_name('price')
-    pricelistreg = hitime_driver.find_elements_by_class_name('regular-price')
-
-    
-    # we need to attempt to filter down this list
-    index = 0
-    for title in titlelist:
-        # debugging
-        if verbose > 5: 
-            print_html_elem( 'hitimes_search:title', index, title )
-        # increment the index
-        index += 1
-
-    # RAW filter out of this list any "old" price entries
-    index = 0
-    pricelistrawfiltered = []
-    if len(pricelistraw) > len(titlelist):
-        # not the same size - so filter down
-        for price in pricelistraw:
-            # debugging
-            if verbose > 4:
-                print_html_elem( 'hitimes_search:raw price', index, price )
-
-            # increment the counter
-            index += 1
-            # determine if we are keeping this item
-            if hitimes_price_elem_include( 'hitimes_search:reg:', price):
-                # keep this price
-                pricelistrawfiltered.append(price)
-
-    # price is not greater than title list - see if they are the same - if they are - set it
-    elif len(titlelist) == len(pricelistraw):
-        # debugging
-        if verbose > 0:
-            print('hitime_search:price-raw-same-length-just-copy-over')
-        pricelistrawfiltered = pricelistraw
-
-    # REG filter out of this list any "old" price entries
-    index = 0
-    pricelistregfiltered = []
-    if len(pricelistreg) > len(titlelist):
-        # we need to attempt to filter down this list
-        for price in pricelistreg:
-            # debugging
-            if verbose > 4:
-                print_html_elem( 'hitimes_search:reg price', index, price )
-
-            # increment the counter
-            index += 1
-            # determine if we are keeping this item
-            if hitimes_price_elem_include( 'hitimes_search:reg:', price):
-                # keep this price
-                pricelistregfiltered.append(price)
-    # price is not greater than title list - see if they are the same - if they are - set it
-    elif len(titlelist) == len(pricelistreg):
-        # debugging
-        if verbose > 4:
-            print('hitime_search:price-regular-same-length-just-copy-over')
-        pricelistregfiltered = pricelistreg
+    entitylist = hitime_driver.find_elements_by_xpath('//*[@id="category-products-grid"]/ol/li')
 
     # debugging
-    if verbose > 4:
-        print('len titlelist:', len(titlelist))
-        print('len pricelistraw:', len(pricelistraw))
-        print('len pricelistreg:', len(pricelistreg))
-        print('len pricelistrawfiltered:', len(pricelistrawfiltered))
-        print('len pricelistregfiltered:', len(pricelistregfiltered))
+    if verbose > 5:
+        print('entitylist:', entitylist)
 
-    # debugging
-    print('hitime_search:returned records:',  len(titlelist))
+    # step through this list
+    for entity in entitylist:
+        # extract out for this entry these - we use elements so we don't need to try/catch
+        titlelist = entity.find_elements_by_class_name('product-name')
+        pricelistraw = entity.find_elements_by_class_name('price')
+        pricelistreg = entity.find_elements_by_class_name('regular-price')
 
-    # message we have a problem
-    if len(titlelist) == len(pricelistrawfiltered):
-        if verbose > 4:
-            print('hitimes_search:pricelistrawfiltered')
-        pricelist = pricelistrawfiltered
-    elif len(titlelist) == 1 and len(pricelistrawfiltered) > 1:
-        if verbose > 4:
-            print('hitimes_search:pricelistrawfiltered:one-wine')
-        pricelist = pricelistrawfiltered
-    elif len(titlelist) == len(pricelistregfiltered):
-        if verbose > 4:
-            print('hitimes_search:pricelistregfiltered')
-        pricelist = pricelistregfiltered
-    else:
-        print('hitime_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
-        pricelist = pricelistrawfiltered
+        # debugging
+        if verbose > 5:
+            print('pricelistraw:', pricelistraw)
+            print('pricelistreg:', pricelistreg)
 
-    # now loop through the wines we found
-    for index in range(len(titlelist)):
-        found_wines.append( hitime_extract_wine_from_DOM(index,titlelist,pricelist) )
+        # pull out the entry of interest
+        if len(pricelistraw):
+            found_wines.append( hitime_extract_wine_from_DOM(0,titlelist,pricelistraw) )
+        else:
+            found_wines.append( hitime_extract_wine_from_DOM(0,titlelist,pricelistreg) )
+
 
     # debugging
     if verbose > 5:
@@ -1047,34 +979,19 @@ def pavillions_extract_wine_from_DOM(index,titlelist,pricelist):
 # Search for the wine
 def pavillions_search( srchsring, pavillions_driver ):
 
-    # /html/body/div[1]/div/div/div[1]/div/div/div/div/div[1]/div[4]/form/div/div/input
-
-    # Select the search box(es) and find if any are visbile - there can be more than one returned value
-    # search_box = pavillions_driver.find_element_by_xpath('//*[@id="ecomm-search"]')
-    # search_box = pavillions_driver.find_element_by_name('q')
-    search_box = pavillions_driver.find_element_by_id('inputSearch')
-    search_boxs = pavillions_driver.find_elements_by_id('inputSearch')
-
-
+    # find the search box
+    search_box = pavillions_driver.find_element_by_xpath('//*[@id="search-img"]')
+    
     # debugging
-    print('pavillions_search:search_box:', search_box)
-    print('number of search_boxs:', len(search_boxs))
-    for element in search_boxs:
-        print_html_elem('pavillions_search:element:', 0, element)
-        print('=================================')
+    if verbose > 5:
+        # find all the matches - get all - not just first
+        search_boxs = pavillions_driver.find_elements_by_xpath('//*[@id="search-img"]')
+        print('number of search_boxs:', len(search_boxs))
+        for element in search_boxs:
+            print_html_elem('pavillions_search:element:', 0, element)
+            print('=================================')
 
-    if not search_box.is_displayed():
-        print('pavillions_search:sleep(10)')
-        time.sleep(10)
-
-    # first check to see that the search box is displayed - if not visible then click the bottom that makes it visible
-    if not search_box.is_displayed():
-        # debugging
-        print ('pavillions_search:search box is not displayed - this is a problem - exit')
-        print_html_elem('pavillions_search:search_box:', 0, search_box)
-        pavillions_driver.execute_script("$(arguments[0]).click();", search_box)
-        # search_box.click()
-
+    # check to see the search box is visible - if not we have a problem
     if not search_box.is_displayed():
         # debugging
         print ('pavillions_search:search box 2 is not displayed - this is a problem - exit')
@@ -1236,8 +1153,8 @@ storelist = [
 
 # uncomment this line if you want to limit the number of stores you are working
 #storelist = ['wally']
-# storelist = ['hitime']
-storelist = ['pavillions']
+#storelist = ['hitime']
+#storelist = ['pavillions']
 
 # srchstring - set at None - then we will look up the information from the file
 srchstring_list = None
@@ -1254,6 +1171,8 @@ srchstring_list = None
 #srchstring_list = ['richard']
 #srchstring_list = ['arista','richard','richard cognac']
 #srchstring_list = ['kosta']
+#srchstring_list = ['cakebread']
+#srchstring_list = ['hope']
 
 # if not user defined - generate the list if we don't have one predefined
 if srchstring_list == None:
