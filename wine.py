@@ -10,7 +10,7 @@ import sys
 # pavillions is NOT working in this version - it has been commented out
 
 # appversion
-appversion = '1.15'
+appversion = '1.16'
 
 # global variable - rundate set at strat
 datefmt = '%m/%d/%Y'
@@ -184,7 +184,8 @@ def print_html_elem( msg, index, elem):
     print (msg, ' outerHTML:', elem.get_attribute('outerHTML'))
     print (msg, ' text:', elem.get_attribute('text'))
     print (msg, ' displayed:', elem.is_displayed())
-
+    print (msg, ' location:', elem.location)
+    print (msg, ' size:', elem.size)
 
 # exit application with error code
 def exitWithError( msg='' ):
@@ -1052,16 +1053,27 @@ def pavillions_search( srchsring, pavillions_driver ):
     # search_box = pavillions_driver.find_element_by_xpath('//*[@id="ecomm-search"]')
     # search_box = pavillions_driver.find_element_by_name('q')
     search_box = pavillions_driver.find_element_by_id('inputSearch')
+    search_boxs = pavillions_driver.find_elements_by_id('inputSearch')
+
 
     # debugging
     print('pavillions_search:search_box:', search_box)
+    print('number of search_boxs:', len(search_boxs))
+    for element in search_boxs:
+        print_html_elem('pavillions_search:element:', 0, element)
+        print('=================================')
+
+    if not search_box.is_displayed():
+        print('pavillions_search:sleep(10)')
+        time.sleep(10)
 
     # first check to see that the search box is displayed - if not visible then click the bottom that makes it visible
     if not search_box.is_displayed():
         # debugging
         print ('pavillions_search:search box is not displayed - this is a problem - exit')
         print_html_elem('pavillions_search:search_box:', 0, search_box)
-        search_box.click()
+        pavillions_driver.execute_script("$(arguments[0]).click();", search_box)
+        # search_box.click()
 
     if not search_box.is_displayed():
         # debugging
@@ -1175,7 +1187,7 @@ def create_pavillions_selenium_driver(defaultzip):
         # see if the zipcode field is here
         if driver.find_element_by_xpath('//*[@id="zipcode"]'):
             # debugging
-            print ('pavillions_driver:need to fill out the zipcode: ', defaultzip)
+            print ('pavillions_driver:filling in the zipcode: ', defaultzip)
 
             # set the store to the defaultstore
             zipcode_box = driver.find_element_by_xpath('//*[@id="zipcode"]')
@@ -1224,8 +1236,8 @@ storelist = [
 
 # uncomment this line if you want to limit the number of stores you are working
 #storelist = ['wally']
-#storelist = ['hitime']
-#storelist = ['pavillions']
+# storelist = ['hitime']
+storelist = ['pavillions']
 
 # srchstring - set at None - then we will look up the information from the file
 srchstring_list = None
