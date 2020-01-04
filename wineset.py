@@ -1,3 +1,14 @@
+'''
+@author:   Ken Venner
+@contact:  ken@venerllc.com
+@version:  1.08
+
+Read in a file of wine names and create consistent wine descriptions 
+from these names.
+
+'''
+
+
 import kvutil
 import kvcsv
 import re
@@ -8,7 +19,7 @@ import shutil
 # application variables
 optiondictconfig = {
     'AppVersion' : {
-        'value' : '1.07',
+        'value' : '1.08',
         'description' : 'defines the version number for the app',
     },
     'debug' : {
@@ -79,6 +90,7 @@ reCase = re.compile(r'12\s*X\s*750\s*ML|\bcase\b|12\/750\s*ML',re.IGNORECASE)
 sizeLookup = (
     ('1.75L', re.compile(r'\b1\.75\s*Li?', re.IGNORECASE)),
     ('1.5L', re.compile(r'\b1\.5\s*L?\b|\bMagnum\b', re.IGNORECASE)),
+    ('375mL', re.compile(r'Half\s+Bottle', re.IGNORECASE)),
     ('3L', re.compile(r'\b3\s*Li?', re.IGNORECASE)),
     ('6L', re.compile(r'\b6\s*Li?', re.IGNORECASE)),
     ('9L', re.compile(r'\b9\s*Li?', re.IGNORECASE)),

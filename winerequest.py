@@ -1,5 +1,6 @@
 import kvutil
 
+import datetime
 import re
 import requests
 #from bs4 import BeautifulSoup
@@ -12,7 +13,7 @@ glb_last_line_max  =3
 # application variables
 optiondictconfig = {
     'AppVersion' : {
-        'value' : '1.13',
+        'value' : '1.15',
         'description' : 'defines the version number for the app',
     },
     'debug' : {
@@ -50,13 +51,21 @@ def get_wines_from_stores( srchstring_list, storelist, debug=False ):
     # create the list of records for each search string
     found_wines = []
 
+    # debugging
+    print('winerequest:get_wines_from_stores')
+
     # step through the search strings
     for srchstring in srchstring_list:
         # step through the store list
         for store in storelist:
+            # debugging
+            print('get_wines_from_stores:store:',store)
             # processing logic
             if store == 'nhliquor':
                 found_wines.extend(nhliquor_wine_searcher( srchstring, debug=debug ))
+            elif store == 'ken': # 'johnpete':
+                # this is not working right now
+                print('winerequest:get_wines_from_stores:', store, ':SKIPPING store - not working')
             else:
                 found_wines.extend(generic_wine_searcher( srchstring, store, store_args, debug=debug ))
 
@@ -82,10 +91,10 @@ def store_definitions():
         },
         'winex' : {
             'search_args' : {
-                'url_fmt'      : 'https://www.winex.com/searchwines.html',
-                'payload'      : { 'keywords' :  'no-value-substitued' },
-                'payload_fld'  : 'keywords',
-                're_noresults' : [ re.compile('No Results were found') ],
+                'url_fmt'      : 'https://www.winex.com/catalogsearch/result/?q=%s',
+#                'payload'      : { 'keywords' :  'no-value-substitued' },
+#                'payload_fld'  : 'keywords',
+                're_noresults' : [ re.compile('Your search returned no results.') ],
             },
             'splitter_args' : {
                 're_splitters' : [ (re.compile('<td'), '\n<td'), ]
@@ -178,6 +187,7 @@ def store_definitions():
             'search_args' : {
                 'url_fmt'      : 'http://www.johnandpetes.com/index.php/view-all-products-in-shop/Page-1-50?keyword=%s',
                 're_noresults' : [ re.compile('No Products Found') ],
+                'UserAgent'    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:66.0) Gecko/20100101 Firefox/66.0', # 'MyAgent' + datetime.datetime.now().strftime('%Y%m%d'),
             },
             'splitter_args' : {
                 're_splitters' : [ (re.compile('"productPrice">\s*\$', re.IGNORECASE), '"productPrice">\$'), ],
@@ -671,7 +681,17 @@ def generic_wine_splitter( content, re_splitters=None, debug=False ):
 def generic_wine_searcher( srchstring, store, store_args, debug=False ):
     
     # full test of the generic features
-    content = generic_wine_content_searcher( srchstring, **store_args[store]['search_args'] )
+    if False:
+        try:
+            content = generic_wine_content_searcher( srchstring, **store_args[store]['search_args'] )
+        except:
+            return []
+    else:
+        # debugging
+        if debug:
+            print('generic_wine_searcher:store:', store)
+        # want it to fail here so we can see the error
+        content = generic_wine_content_searcher( srchstring, **store_args[store]['search_args'] )
 
     # check the content - there may be nothing here - if so return blank array
     if not content:
@@ -688,7 +708,12 @@ def generic_wine_searcher( srchstring, store, store_args, debug=False ):
 # optionally, use the list of re_noresults to determine if no results were found
 # return back the content that will then be split and parsed
 #
-def generic_wine_content_searcher( srch_string, url_fmt, payload=None, payload_fld = None, re_noresults=None ):
+def generic_wine_content_searcher( srch_string, url_fmt, payload=None, payload_fld = None, re_noresults=None, UserAgent = None, debug=False ):
+
+    # create headers if we need to
+    headers = None
+    if UserAgent:
+        headers = {'User-agent' : UserAgent}
 
     # action based on the type of information provided
     if payload:
@@ -705,21 +730,31 @@ def generic_wine_content_searcher( srch_string, url_fmt, payload=None, payload_f
         # just create the url in the right string point
         url_final = url_fmt
         
+        # debugging
+        if debug:
+            print('generic_wine_content_searcher:payload:post_url:', url_final)
+            print('generic_wine_content_searcher:payload:post_payload:', payload)
+
         # now we create the post request
         session = requests.session()
-        r = requests.post( url_final, payload )
+        r = requests.post( url_final, payload, headers=headers )
     else:
         # GET a page transaction
         #
         # calculate the final url
         url_final = url_fmt % srch_string
 
+        # debugging
+        if debug:
+            print('generic_wine_content_searcher:payload:post_url:', url_final)
+
         # get the page
-        r = requests.get( url_final )
+        r = requests.get( url_final, headers=headers )
 
     # check the status code - if invalid raise error
     if r.status_code != 200:
         print('generic_wine_content_searcher:not 200:url_final:', url_final, ':status_code:', r.status_code)
+        print('generic_wine_content_searcher:content:', r.content)
         raise
 
     # check to see if there were any results
@@ -881,7 +916,9 @@ if __name__ == '__main__':
     AppVersion = optiondict['AppVersion']
     srchstring = optiondict['srchstring']
 
-    if storelist in optiondict:
+    # pick the store we are going to check
+    if 'storelist' in optiondict:
+        # passed in on the command line
         winereq_storelist = [optiondict['storelist']]
     else:
         # (winerequest) request stores
@@ -895,6 +932,11 @@ if __name__ == '__main__':
             'nhliquor',
             'rolf',
         ]
+
+    # debugging
+    if debug:
+        print('srchstring:', srchstring)
+        print('storelist:', winereq_storelist)
 
     # read in the wines defined
     wines = get_wines_from_stores( [srchstring], winereq_storelist, debug=debug )

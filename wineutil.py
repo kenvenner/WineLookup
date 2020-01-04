@@ -5,14 +5,10 @@ import kvutil
 
 from operator import itemgetter
 
-# logging
-import logging
-logger = logging.getLogger(__name__)
-
 # application variables
 optiondictconfig = {
     'AppVersion' : {
-        'value' : '1.07',
+        'value' : '1.05',
         'description' : 'defines the version number for the app',
     },
     'debug' : {
@@ -100,17 +96,7 @@ def rank_records( list2rank, srchstring, namefld='wine_name', rankfld='search_hi
             firstsearch=1
 
         if pricefld:
-            try:
-                rec[rankfld] = int(rec[rankfld] * 10000.0 + float(rec[pricefld]))
-            except Exception as e:
-                # hard code the rank - we could not price convert
-                rec[rankfld] = int(rec[rankfld] * 10000.0 + 5000)
-                # log this one
-                logger.error('rank_records:record:%s', rec)
-                logger.error('rank_records:error:%s', str(e))
-                # send out a message
-                print('Error:', str(e))
-                print('Rec:', rec)
+            rec[rankfld] = int(rec[rankfld] * 10000.0 + float(rec[pricefld]))
 
 #    a) set up local variables
 #    b) get first word from this string (srchstring)
@@ -121,9 +107,6 @@ def rank_records( list2rank, srchstring, namefld='wine_name', rankfld='search_hi
 #    g) generate HTML string
 #
 def html_body_from_email_subject(subject_srchstring, winesel_storelist, winereq_storelist, debug=False):
-
-    # log that we are here
-    logger.info('wine:%s:selStores:%s:reqStores:%s', subject_srchstring, winesel_storelist, winereq_storelist)
 
     # set up - we are defining what we are putting in the email
     if debug:
@@ -136,6 +119,9 @@ def html_body_from_email_subject(subject_srchstring, winesel_storelist, winereq_
     htmlbodytop = '<html><body>\n'
     htmlbodybtm = '</body></html>\n'
     
+    # debugging
+    print('wineutil:html_body_from_email_subject:subject:', subject_srchstring)
+
     # get the first word from the search string
     srchstring = subject_srchstring.split()[0]
 
@@ -166,12 +152,7 @@ def html_body_from_email_subject(subject_srchstring, winesel_storelist, winereq_
         print('sorted_wines:', sorted_wines)
         print('-'*80)
 
-        try:
-            kvcsv.writelist2csv( 'email.csv', found_wines, ['wine_name','wine_store', 'wine_price'] )
-        except Exception as e:
-            print('could not create email.csv:', str(e))
-            raise e
-                  
+        kvcsv.writelist2csv( 'email.csv', found_wines, ['wine_name','wine_store', 'wine_price'] )
         print('check out:email.csv')
         with open( 'ken.html', 'w' ) as f:
             f.write(htmlbodytop)
