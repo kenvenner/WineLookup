@@ -1,9 +1,9 @@
 '''
 @author:   Ken Venner
 @contact:  ken@venerllc.com
-@version:  1.105
+@version:  1.157
 
-Using Selenium and Chrome - screen scrape wine websites to draw
+Using Selenium and Chrome/Firefox - screen scrape wine websites to draw
 down wine pricing and availiability information
 
 '''
@@ -15,6 +15,7 @@ from selenium.common.exceptions import NoSuchElementException
 import requests
 
 import kvutil
+import kvgmailsend
 
 import time
 import re
@@ -22,16 +23,38 @@ import datetime
 import sys
 
 
+# logging - 
+import kvlogger
+config=kvlogger.get_config(kvutil.filename_log_day_of_month(__file__, ext_override='log'), 'logging.FileHandler')
+kvlogger.dictConfig(config)
+logger=kvlogger.getLogger(__name__)
+
+# added logging feature to capture and log unhandled exceptions
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = handle_exception
+
+
 # application variables
 optiondictconfig = {
     'AppVersion' : {
-        'value' : '1.105',
+        'value' : '1.157',
         'description' : 'defines the version number for the app',
     },
     'test' : {
         'value' : False,
         'type'  : 'bool',
         'description' : 'defines if we are running in test mode',
+    },
+    'debug' : {
+        'value' : False,
+        'type'  : 'bool',
+        'description' : 'defines if we are running in debug mode',
     },
     'verbose' : {
         'value' : 1,
@@ -42,6 +65,11 @@ optiondictconfig = {
         'value' : None,
         'description' : 'defines the name of the wine to search for when in test mode',
     },
+    'srchstring_list' : {
+        'value' : None,
+        'type'  : 'liststr',
+        'description' : 'defines the list of wine to search for when in test mode',
+    },
     'srchlist' : {
         'value' : None,
         'description' : 'mistaken command line for srchstring',
@@ -49,6 +77,10 @@ optiondictconfig = {
     'storelist' : {
         'value' : None,
         'description' : 'defines the name of the store we are querying - only when testing',
+    },
+    'store_list' : {
+        'value' : None,
+        'description' : 'mistaken command line for storelist',
     },
     'wineoutfile' : {
         'value' : 'wineselenium.csv',
@@ -62,16 +94,33 @@ optiondictconfig = {
         'value' : 'wine_xlat.csv',
         'description' : 'defines the name of the input file for translating wine names',
     },
-    'waitonerror' : {
-        'value' : False,
-        'type'  : 'bool',
-        'description' : 'defines if we wait on error vs exit',
+
+    # Email notifications built into the application
+    'EmailFromAddr' : {
+        'value' : 'wines@vennerllc.com',
+        'description' : 'defines the email account used to send out notifications',
+    },
+    'EmailFromPassword' : {
+        'value' : '',
+        'description' : 'defines the password used to log into the EmailFromAddr account',
+    },
+    'EmailToAddr' : {
+        'value' : 'ken@vennerllc.com',
+        'description' : 'defines the list of email addresses we are notifying',
+    },
+    'EmailSubject' : {
+        'value' : 'Wine Processing Update - Total Wines Robot Interaction Required',
+        'description' : 'defines the subject line of the email',
+    },
+    'EmailBody' : {
+        'value' : 'Please RDP into the machine and interact with TotalWines web page to get past robot detection',
+        'description' : 'defines the body of the email',
     },
 
-    'bevmoretrycount' : {
-        'value' : 3,
-        'type'  : 'int',
-        'description' : 'defines number of times we attempt to create the bevmo driver',
+    # control the type of browser we are using to do the automation
+    'browser' : {
+        'value' : 'chrome',
+        'description' : 'defines which browser we are using to automate with',
     },
 
 }
@@ -80,29 +129,46 @@ optiondictconfig = {
 test=False
 
 # global variable - rundate set at strat
-datefmt = '%m/%d/%Y'
-rundate = datetime.datetime.now().strftime(datefmt)
-store_wine_lookup = {}
+datefmt       = '%m/%d/%Y'
+rundate       = datetime.datetime.now().strftime(datefmt)
 AppVersion    = 'NotSet'
 wineoutfile   = 'wineselenium.csv'
 wineinputfile = 'getwines.bat'  #overwritten later
 winexlatfile  = 'wine_xlat.csv' #overwritten later
-verbose=1
+verbose       = 1
+
+rtnrecfmt     = '%s:returned records:%s'
+
+# cause print statements that are not debugging statements to print out
+pmsg          = False
+
+store_wine_lookup = {}
+
 
 # global variable as we need to figure out at run time which to use
 pavillions_search_xpath = ''
 
+# define the brower to use (chrome or firefox)
+browser = 'chrome'
+
 # --- FILE ROUTINES --------------------
 
 # -- read in the list of wines
-def get_winelist_from_file( getwines_file ):
+def get_winelist_from_file( getwines_file, debug=False ):
     # get the results
     searchlist = []
+
+    # debugging
+    if pmsg: print('wineselenium.py:get_winelist_from_file:', getwines_file)
+    logger.info('getwines_file:%s', getwines_file)
 
     # open file and process
     with open(getwines_file, 'r') as fp:
         # for each line in the file see if it matches a regex of interest
         for line in fp:
+            # debugging
+            if debug:  print('wineselenium.py:get_winelist_from_file:line:',line)
+            logger.debug('line:%s', line)
             # regex #1 match
             m=re.match('perl\s+findwine.pl\s+search="([^"]*)"\s', line)
             # if that did not match - try regex #2 match
@@ -113,21 +179,34 @@ def get_winelist_from_file( getwines_file ):
             if m:
                 # extract out the match which is the wine
                 searchlist.append(m.group(1))
+                # debugging
+                if debug:  print('wineselenium.py:get_winelist_from_file:added to wine list:',m.group(1))
+                logger.debug('added to wine list:%s', m.group(1))
+                
 
     # return the list we found
     return searchlist
 
 # take from the list of wines we need to process - remove those already processed
-def remove_already_processed_wines( winefile, searchlist):
+def remove_already_processed_wines( winefile, searchlist, debug=False):
     global verbose
 
     # create the hash that captures what we have seen and not seen already
     seen_wines = []
 
+    # messaging
+    if pmsg: print('wineselenium.py:remove_already_processed_wines:winefile:', winefile)
+    logger.info('winefile:%s',winefile)
+    logger.debug('rundate:%s', rundate)
+    logger.debug('srchlist:%s', searchlist)
+    
+    # debugging
+    if debug:
+        if pmsg: print('wineselenium.py:remove_already_processed_wines:rundate:', rundate)
+        if pmsg: print('wineselenium.py:remove_already_processed_wines:srchlist:', searchlist)
+
     # put try loop in to deal with case when file does not exist
     try:
-        # give  some information here
-        print('remove_already_processed_wines:winefile:', winefile)
         # open the file and process it
         with open(winefile, 'r') as fp:
             for line in fp:
@@ -147,18 +226,24 @@ def remove_already_processed_wines( winefile, searchlist):
     except:
         # just move on
         if verbose:
-            print('remove_already_processed_wines:', winefile, ':does not exist-no wines removed from processing list')
-
+            if pmsg: print('wineselenium.py:remove_already_processed_wines:', winefile, ':does not exist-no wines removed from processing list')
+        logger.warning('winefile does not exist:%s', winefile)
+        
     # log informaton
-    print('remove_already_processed_wines:seen_wines:', seen_wines)
-
+    if pmsg: print('wineselenium.py:remove_already_processed_wines:wines_removed_already_processed:', seen_wines)
+    if pmsg: print('wineselenium.py:remove_already_processed_wines:remaining_wines_to_search:', searchlist)
+    logger.info('wines_removed_already_processed:%s', seen_wines)
+    logger.info('remaining_wines_to_search:%s', searchlist)
+    
     # return the pruned list
     return searchlist
 
 # read in the translation file from store/wine to store/wine with vintage
 def read_wine_xlat_file( getwines_file, debug=False ):
-    # blank dictionary to start
-    store_wine_lookup = {}
+    # we are populating the module level variable that will be used by other functions in this module
+    #
+    # Module level variable:
+    # store_wine_lookup = {}
     
     # open file and process
     with open(getwines_file, 'r') as fp:
@@ -173,7 +258,8 @@ def read_wine_xlat_file( getwines_file, debug=False ):
                 if elem[1] in store_wine_lookup[elem[0]].keys():
                     # debugging
                     if debug:
-                        print('read_wine_xlat_file:',elem[0],':',elem[1],' mapping changed from (', store_wine_lookup[elem[0]][elem[1]], ') to (', elem[2], ')')
+                        if pmsg: print('read_wine_xlat_file:',elem[0],':',elem[1],' mapping changed from (', store_wine_lookup[elem[0]][elem[1]], ') to (', elem[2], ')')
+                    logger.debug('%s:%s:mapping changed from:%s:to:%s',elem[0],elem[1], store_wine_lookup[elem[0]][elem[1]], elem[2])
                 # set the value no matter what
                 store_wine_lookup[elem[0]][elem[1]] = elem[2]
             
@@ -185,26 +271,25 @@ def read_wine_xlat_file( getwines_file, debug=False ):
 def xlat_wine_name( store_wine_lookup, store, wine ):
     global verbose
     
+    # check for a match based on the passed in name
     if store in store_wine_lookup.keys():
         # debugging
-        if verbose > 5:
-            print('xlat_wine_name:store matched:', store)
-            print('xlat_wine_name:store list of wines:', store_wine_lookup[store])
+        logger.debug('store matched:%s', store)
+        logger.debug('store list of wines:%s', store_wine_lookup[store])
         if wine in store_wine_lookup[store].keys():
             # debugging
-            if verbose > 5:
-                print('xlat_wine_name:wine matched:', wine)
+            logger.debug('wine matched:%s', wine)
             return store_wine_lookup[store][wine]
 
-    # using the name provided - regex the name field to remove any commas
+    # did not find a match based on the wine name passed in
+    # regex the name field to remove any commas
+    # and try again
     if re.search(',', wine):
         # debugging
-        if verbose > 1:
-            print ('xlat_wine_name:comma in wine:',wine)
+        logger.debug('comma in wine:%s',wine)
         wine = re.sub(',',' ',wine)
         # debugging
-        if verbose > 2:
-            print ('xlat_wine:comma stripped from wine:',wine)
+        logger.debug('comma stripped wine:%s',wine)
     
     # pass back the wine passed in (cleaned up)
     return wine
@@ -212,12 +297,22 @@ def xlat_wine_name( store_wine_lookup, store, wine ):
 
 
 # -- output file
-def save_wines_to_file(file, srchstring, winelist):
+def save_wines_to_file(file, srchstring, winelist, debug=False):
     global verbose
+    
+    # module level variables used:
+    #   store_wine_lookup - created by call to read_wine_xlat_file
+
 
     # debugging
-    if verbose > 5:
-        print ('save_wines_to_file:started')
+    if debug:
+        if pmsg: print('wineselenium.py:save_wines_to_file:file:', file)
+        if pmsg: print('wineselenium.py:save_wines_to_file:srchstring:', srchstring)
+        if pmsg: print('wineselenium.py:save_wines_to_file:len(winelist):', len(winelist))
+    logger.debug('file:%s', file)
+    logger.debug('srchstring:%s', srchstring)
+    logger.debug('len(winelist):%d', len(winelist))
+
 
 #    # column headings
 #    column_headings = [
@@ -237,62 +332,140 @@ def save_wines_to_file(file, srchstring, winelist):
                 # regex the name field to remove any commas
                 if re.search(',', rec['wine_price']):
                     # debugging
-                    if verbose > 5:
-                        print ('xlat_wine:comma in price:',rec['wine_price'])
+                    logger.debug('comma in price:%s',rec['wine_price'])
                     # strip out the comma in price if it exists (might wnat to get rid of this)
                     rec['wine_price'] = re.sub(',','',rec['wine_price'])
                     # debugging
-                    if verbose > 6:
-                        print ('xlat_wine:comma stripped from price:',rec['wine_price'])
+                    logger.debug('comma stripped price:%s',rec['wine_price'])
                 
                 # save - but also convert the wine name if there is a translation
                 winecsv.write(','.join([rundate,srchstring,rec['wine_store'],xlat_wine_name(store_wine_lookup,rec['wine_store'],rec['wine_name']),rec['wine_price']])+"\n")
             else:
                 # debugging
-                if verbose > 0:
-                    print ('save_wines_to_file:no wine price for:', rec['wine_store'], ':', rec['wine_name'])
+                logger.info('no wine price for:%s:%s', rec['wine_store'], rec['wine_name'])
 
     # debugging
-    if verbose > 0:
-        print ('save_wines_to_file:', srchstring, ':completed')
+    logger.info('saved records for:%s:%d', srchstring, len(winelist))
                 
 # routine that saves the current browser content to a file
 def saveBrowserContent( driver, filenametemplate, function ):
+    # save the page content in HTML file
     filename = kvutil.filename_unique( 'fail' + filenametemplate + '.html', {'uniqtype': 'datecnt', 'forceuniq' : True } )
     with open( filename, 'wb' ) as p:
         p.write( driver.page_source.encode('utf-8') )
-    print(function + ':saved html page content to:', filename)
+    logger.info('%s:saved html page content to:%s', function, filename)
 
+    # save the page picture in a PNG file
     filename = kvutil.filename_unique( 'fail' + filenametemplate + '.png', {'uniqtype': 'datecnt', 'forceuniq' : True } )
     driver.save_screenshot(filename)
-    print(function + ':saved page screen shot to:', filename)
+    logger.info('%s:saved page screen shot to:%s', function, filename)
 
+
+# except print 
+def exceptionPrint ( e, msg, msg2, saveBrowser=False, driver=None, filename=None, msg3=None, exitPgm=False, debug=False):
+        if pmsg: print(msg + ':' + msg2)
+        if pmsg: print(msg + ':type:', type(e))
+        if pmsg: print(msg + ':args:', e.args)
+        logger.error('%s:%s', msg, msg2)
+        logger.error('%s:type:%s', msg, type(e))
+        logger.error('%s:args:%s', msg, e.args)
         
+        if saveBrowser:
+            if not driver:
+                if pmsg: print(msg + ':exceptionPrint:saveBrowser:no-driver-passed-in:'+msg2)
+                logger.error('%s:saveBrowser:no-driver-passed-in:', msg, msg2)
+                return
+            elif not filename:
+                if pmsg: print(msg + ':exceptionPrint:saveBrowser:no-filename-passed-in:'+msg2)
+                logger.error('%s:saveBrowser:no-filename-passed-in:', msg, msg2)
+                return
+            if not msg3:
+                msg3 = msg + ':' + msg2
+            saveBrowserContent( driver, filename, msg3)
+        if exitPgm:
+            if pmsg: print(msg + ':exiting program due to error')
+            logger.error('%s:exiting program due to error', msg)
+            exitWithError()
+
+
+# get the requested URL - allow loopcnt number of tries
+def get_url_looped( driver, url, msg, loopcnt=4, waitsecs=1, displayFailure=True, debug=False ):
+    while loopcnt:
+        try:
+            driver.get(url)
+            return True
+        except Exception as e:
+            if displayFailure:
+                if pmsg: print(msg+':loopcnt:', loopcnt)
+                if pmsg: print(msg+':unable to get:'+url)
+                if pmsg: print(msg+':str:', str(e))
+                if pmsg: print(msg+':type:', type(e))
+                if pmsg: print(msg+':args:', e.args)
+
+                logger.info('%s:loopcnt:%s', loopcnt)
+                logger.info('%s:unable to get:%s', url)
+                logger.info('%s:str:%s', str(e))
+                logger.info('%s:type:%s', type(e))
+                logger.info('%s:args:%s', e.args)
+            loopcnt -= 1
+            time.sleep(waitsecs)
+
+# attempt to find a set of elements in a page
+def find_elements_looped(driver, name, byType, msg, msg2, loopcnt=4, waitsecs=3, displayFailure=True, debug=False ):
+    if byType in ('by_class_name', 'byClassName', 'class_name', 'className'):
+        results = driver.find_elements_by_class_name( name )
+    elif byType in ('by_name', 'byName', 'name'):
+        results = driver.find_elements_by_name( name )
+    elif byType in ('by_xpath', 'byXpath', 'xpath'):
+        results = driver.find_elements_by_xpath( name )
+    elif byType in ('by_id', 'byID', 'id'):
+        results = driver.find_elements_by_id( name )
+
+    while not results and loopcnt:
+        if displayFailure:
+            logger.info('%s:%s:%s:%d',msg,msg2,name,loopcnt)
+        loopcnt -= 1
+        time.sleep(waitsecs)
+
+        if byType in ('by_class_name', 'byClassName', 'class_name', 'className'):
+            results = driver.find_elements_by_class_name( name )
+        elif byType in ('by_name', 'byName', 'name'):
+            results = driver.find_elements_by_name( name )
+        elif byType in ('by_xpath', 'byXpath', 'xpath'):
+            results = driver.find_elements_by_xpath( name )
+        elif byType in ('by_id', 'byID', 'id'):
+            results = driver.find_elements_by_id( name )
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 
 # dump out an HTML element additional data
 def print_html_elem( msg, index, elem):
-    print ('-----------------------------------------')
-    print ('index:', index)
-    print (msg, ' class:', elem.get_attribute('class'))
-    print (msg, ' type:', elem.get_attribute('type'))
-    print (msg, ' id:', elem.get_attribute('id'))
-    print (msg, ' parentElement:', elem.get_attribute('parentElement'))
-    print (msg, ' outerHTML:', elem.get_attribute('outerHTML'))
-    print (msg, ' text:', elem.get_attribute('text'))
-    print (msg, ' displayed:', elem.is_displayed())
-    print (msg, ' location:', elem.location)
-    print (msg, ' size:', elem.size)
-    print ('-----------------------------------------')
+    if pmsg: print('-----------------------------------------')
+    if pmsg: print('index:', index)
+    if pmsg: print(msg, ' class:', elem.get_attribute('class'))
+    if pmsg: print(msg, ' type:', elem.get_attribute('type'))
+    if pmsg: print(msg, ' id:', elem.get_attribute('id'))
+    if pmsg: print(msg, ' parentElement:', elem.get_attribute('parentElement'))
+    if pmsg: print(msg, ' outerHTML:', elem.get_attribute('outerHTML'))
+    if pmsg: print(msg, ' text:', elem.get_attribute('text'))
+    if pmsg: print(msg, ' displayed:', elem.is_displayed())
+    if pmsg: print(msg, ' location:', elem.location)
+    if pmsg: print(msg, ' size:', elem.size)
+    if pmsg: print('-----------------------------------------')
 
 # exit application with error code
 def exitWithError( msg='' ):
     # display optional message
     if msg:
-        print(msg)
-
+        if pmsg: print(msg)
+        logger.error(smg)
+        
     # display that we terminated and then terminate
-    print('TERMINATE')
+    if pmsg: print('TERMINATE')
+    logger.error('TERMINATE')
     sys.exit(1)
 
 # -----------------------------------------------------------------------
@@ -300,19 +473,37 @@ def exitWithError( msg='' ):
 # CHROME SPECIFIC FEATURES #
 
 # created this because upgrade to ChromeDriver 75 broke this script
-def create_chrome_webdriver_w3c_off():
-    # turn off w3c - implemented 20190623;kv
-    opt = webdriver.ChromeOptions()
-    opt.add_experimental_option('w3c', False)
-    driver = webdriver.Chrome(chrome_options=opt)
+def create_webdriver_from_global_var( message ):
+    global browser
+    if message:
+        if pmsg: print(message + ':start:---------------------------------------------------')
+        if pmsg: print(message + ':Start up webdriver.' + browser)
+        logger.info('%s:start up webdriver:%s', message, browser)
+
+    if browser == 'chrome':
+        # turn off w3c - implemented 20190623;kv
+        opt = webdriver.ChromeOptions()
+        opt.add_experimental_option('w3c', False)
+        driver = webdriver.Chrome(chrome_options=opt)
+    else:
+        driver = webdriver.Firefox()
+
     return driver
+
+# -----------------------------------------------------------------------
+
+# routine can be called to create a blank record - no wine found - because we want to know that we looked and did not find anything
+def returnNoWineFound( store ):
+    # no wine found record - update and pass this along
+    return [{ 'wine_store' : store, 'wine_name' : 'Sorry no matches were found', 'wine_price' : '1', 'wine_year' : '', 'label' : store }]
+
 
 # -----------------------------------------------------------------------
 
 #### BEVMO ####
 
 # function used to extract the data from the DOM that was returned
-def bevmo_extract_wine_from_DOM(index,winelist):
+def bevmo_extract_wine_from_DOM(winestore,index,winelist):
     global verbose
 
     # set the variable
@@ -351,7 +542,8 @@ def bevmo_extract_wine_from_DOM(index,winelist):
             if priceelement[0].text.encode('utf-8') == b'5\xc2\xa2 Sale CLUBBEV!':
                 # set the value and get the next price
                 FiveCentSale = True
-                print(winename, ':5 cent sale')
+                if pmsg: print(winename, ':5 cent sale')
+                logger.info('5 cent sale wine:%s', winename)
             else:
                 # this is the price we are going with
                 wineprice = priceelement[0].text
@@ -368,176 +560,154 @@ def bevmo_extract_wine_from_DOM(index,winelist):
 
                 # debugging
                 if verbose > 1:
-                    print ('BevMo' , ":", winename, ":", pricetype, ":", wineprice)
+                    if pmsg: print(winestore , ":", winename, ":", pricetype, ":", wineprice)
+                logger.debug('store:wine:pricetype:price:%s:%s:%s:%s', winestore,winename,pricetype,wineprice)
                 # stop looking
                 break
     #
     # final extracted wine data
-    return { 'wine_store' : 'BevMo', 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : '' }
+    return { 'wine_store' : winestore, 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : winestore }
 
-def bevmo_search_box_find( bevmo_driver, waitonerror=False ):
+def bevmo_search_box_find( bevmo_driver ):
 
     # define what we are looking for
-    search_box=None
-    page_refresh_count_down = 3 # wait times
-    while not search_box and page_refresh_count_down:
+    results = bevmo_driver.find_elements_by_name('fp-input-search')
+    page_refresh_count_down = 4
+    while not results and page_refresh_count_down:
         # debugging
-        print('bevmo_search_box_find:get the main url for the website fresh counter:', page_refresh_count_down)
+        if pmsg: print('bevmo_search_box_find:get the main url for the website fresh counter:', page_refresh_count_down)
+        logger.info('get the main url for the website fresh counter:%d', page_refresh_count_down)
 
+        page_refresh_count_down -= 1
+        
         # refresh page and find search box
         bevmo_driver.get('https://www.bevmo.com')
 
-        # sret the inner loop coutner
-        search_count_down = 4 # wait for times
-
         # loop while we have not found the search box and 
-        while not search_box and search_count_down:
+        results = bevmo_driver.find_elements_by_name('fp-input-search')
+        loopcnt = 4
+        while not results and loopcnt:
         
             # wait time for page to refres
-            print('bevmo_search_box_find:pause 3 sec to allow page to refresh counter:', search_count_down)
+            if pmsg: print('bevmo_search_box_find:waiting for search box to appear:', loopcnt)
+            logger.info('waiting for search box to appear:loopcnt:%d', loopcnt)
+            loopcnt -= 1
             time.sleep(3)
-            
-            # Select the search box(es) and find if any are visbile - there can be more than one returned value
-            # find the search box
-            print('bevmo_search_box_find:find the search boxes count down:', search_count_down)
-            search_boxes = bevmo_driver.find_elements_by_name('fp-input-search')
-            
-            # capture the count of boxes found
-            search_box = len(search_boxes)
-            print('bevmo_search_box_find:search boxes_found:', search_box)
-            
-            # decrement the count down
-            search_count_down -= 1
+            results = bevmo_driver.find_elements_by_name('fp-input-search')
 
-        # out of this loop - decrement the outter loop counter
-        page_refresh_count_down -= 1
-
-        # and loop again if we don't have a search box
 
     # debugging
-    if len(search_boxes) == 0:
-        print('bevmo_search_box_find:number of search_boxes:', len(search_boxes))
-        print('bevmo_search_box_find:exiting program due to error:no search boxes after many tries')
+    if not results:
+        logger.warning('never found the search box for:%s', srchstring)
+        if pmsg: print('bevmo_search_box_find:ERROR:never found the search box:', srchstring)
+        if pmsg: print('bevmo_search_box_find:exiting program due to error:no search boxes after many tries')
         # fail and leave the browser up so we can take a look at it
         saveBrowserContent( bevmo_driver, 'bevmo', 'bevmo_search_box_find' )
-        if waitonerror:
-            input()
-        else:
-            exitWithError()
+        exitWithError()
 
     # debugging
-    print('bevmo_search_box_find:locate the visible search box')
+    if pmsg: print('bevmo_search_box_find:locate the visible search box')
+    logger.info('located the visible search box')
 
     # search the returned boxes to see if any are visible
-    for index in range(len(search_boxes)):
-        if waitonerror:
-            print('bevmo_search_box_find:index:', index)
-        search_box = search_boxes[index]
+    index=0
+    for search_box in results:
         # wrap this in a try/catch to capture errors
         try:
             # check to see if this check box is displayed
-            if search_boxes[index].is_displayed():
+            if search_box.is_displayed():
                 # visible - so we are done
                 # debugging
-                print ('bevmo_search_box_find:search box index:', index, ':is visible - search_box set to this value')
-                return search_boxes[index]
+                if pmsg: print('bevmo_search_box_find:search box index:', index, ':is visible - search_box set to this value')
+                logger.info('search box index that is visbile:%d', index)
+                return search_box
         except:
-            print('bevmo_search_box_find:search_boxes[index].is_displayed():errored out')
+            if pmsg: print('bevmo_search_box_find:search_boxes[index].is_displayed():errored out')
+            log.warning('bevmo_search_box_find:search_boxes[index].is_displayed():errored out')
 
+        # increment the index
+        index += 1
+
+        
     # did not find a displayed search box - click the search button if visible and try again
-    print('bevmo_search_box_find:no visible search boxes - click the search icon')
-    #xpathstr = '//*[@id="header"]/div[3]/div[1]/div[2]/div[1]/a/span[1]'
-    #searchbtn = bevmo_driver.find_element_by_xpath(xpathstr)
+    if pmsg: print('bevmo_search_box_find:no visible search boxes - click the search icon')
+    logger.info('no visible search boxes - click the search icon')
     classname = 'glyphicon-search'
     searchbtns = bevmo_driver.find_elements_by_class_name(classname)
-    print('bevmo_search_box_find:find search button icon count:', len(searchbtns))
+    if pmsg: print('bevmo_search_box_find:find search button icon count:', len(searchbtns))
+    logger.info('find search button icon count:%d', len(searchbtns))
     if len(searchbtns):
         searchbtn = searchbtns[0]
         if searchbtn.is_displayed():
-            print('bevmo_search_box_find:click search icon')
+            if pmsg: print('bevmo_search_box_find:click search icon')
+            logger.info('click search icon')
             searchbtn.click()
             # pause for a second
             time.sleep(1)
         else:
-            print('bevmo_search_box_find:search button NOT visible - NOT pressed')
+            if pmsg: print('bevmo_search_box_find:search button NOT visible - NOT pressed')
+            logger.info('search button NOT visible - NOT pressed')
     else:
-        print('bevmo_search_box_find:search button not found:', classname)
+        if pmsg: print('bevmo_search_box_find:search button not found:', classname)
+        logger.info('search button not found:%s', classname)
 
     # find the search box
-    print('bevmo_search_box_find:find the search boxes:again')
+    if pmsg: print('bevmo_search_box_find:find the search boxes:again')
+    logger.info('find the search boxes:again')
     search_boxes = bevmo_driver.find_elements_by_name('fp-input-search')
-    print('bevmo_search_box_find:boxes_found again:', len(search_boxes))
+    if pmsg: print('bevmo_search_box_find:boxes_found again:', len(search_boxes))
+    logger.info('boxes_found again:%d', len(search_boxes))
 
     # debugging
-    print('bevmo_search_box_find:locate the visible search box:again')
+    if pmsg: print('bevmo_search_box_find:locate the visible search box:again')
+    logger.info('locate the visible search box:again')
 
     # search the returned boxes to see if any are visible
     for index in range(len(search_boxes)):
-        if waitonerror:
-            print('bevmo_search_box_find:again:index:', index)
         search_box = search_boxes[index]
         # check to see if this check box is displayed
         if search_boxes[index].is_displayed():
             # visible - so we are done
             # debugging
-            print ('bevmo_search_box_find:search boxes:again:', index, 'is visible - search_box set to this value')
+            if pmsg: print('bevmo_search_box_find:search boxes:again:', index, 'is visible - search_box set to this value')
+            logger.info('search boxes:again:visible box:%s', index)
             return search_boxes[index]
 
-    print('bevmo_search_box_find:no visible search boxes:again')
-    print('is displayed:', search_box.is_displayed())
-    print('pause')
+    if pmsg: print('bevmo_search_box_find:no visible search boxes:again:TERMINATE program')
+    logger.error('bevmo_search_box_find:no visible search boxes:again:TERMINATE program')
     sys.exit()
-    input()
-
-    # find the search box
-    print('bevmo_search_box_find:find the search boxes:again2')
-    search_boxes = bevmo_driver.find_elements_by_name('fp-input-search')
-    print('bevmo_search_box_find:boxes_found again2:', len(search_boxes))
-    print('bevmo_search_box_find:first box is displayed?:', search_boxes[0].is_displayed())
-
-    if search_boxes[0].is_displayed():
-        return search_boxes[0]
-
-    # return None we did not find one
-    return None
 
 
 # create a search on the web
-def bevmo_search( srchstring, bevmo_driver, waitonerror=False ):
+def bevmo_search( srchstring, bevmo_driver ):
     global verbose
 
-    # no wine found record
-    noWineFound =  { 'wine_store' : 'BevMo', 'wine_name' : 'Sorry no matches were found', 'wine_price' : '1', 'wine_year' : '', 'label' : '' }
+    winestore = 'BevMo'
 
-    # set the variable
-    search_box = None
+    # get the search box we are working with
+    search_box = bevmo_search_box_find( bevmo_driver )
+    loopcnt = 4
 
-    # loop X times searching for the search box
-    for i in range(4):
+    while not search_box and loopcnt:
         # Open the website
-        print('bevmo_search:call bevmo_search_box_find:', i)
+        if pmsg: print('bevmo_search:call bevmo_search_box_find again:', loopcnt)
+        logger.info('call bevmo_search_box_find again:%d', loopcnt)
+        loopcnt -= 1
+        search_box = bevmo_search_box_find( bevmo_driver )
 
-        # get the search box we are working with
-        search_box = bevmo_search_box_find( bevmo_driver, waitonerror )
-
-        # test to see if we found the search_box
-        if search_box:
-            break
 
     # if no search box found - big problems
     if not search_box:
-        print('bevmo_search:never found the displayed search box')
+        if pmsg: print('bevmo_search:ERROR:never found the displayed search box')
+        logger.info('bevmo_search:ERROR:never found the displayed search box')
 
         # fail and leave the browser up so we can take a look at it
-        saveBrowserContent( bevmo_driver, 'bevmo', 'bevmo_search-search_box' )
-        if waitonerror:
-            input()
-        else:
-            exitWithError()
+        saveBrowserContent( bevmo_driver, 'bevmo', 'bevmo_search:search_box' )
+        exitWithError()
 
     # debugging
-    if verbose > 0:
-        print ('bevmo_search:search for:', srchstring)
+    if pmsg: print('bevmo_search:search for:', srchstring)
+    logger.info('search for:%s', srchstring)
 
     # send in the string to this box and press RETURN
     try:
@@ -545,346 +715,339 @@ def bevmo_search( srchstring, bevmo_driver, waitonerror=False ):
         search_box.send_keys(srchstring)
         search_box.send_keys(Keys.RETURN)
     except  Exception as e:
-        print ('bevmo_search:entering search string')
-        print ('bevmo_search:type:', type(e))
-        print ('bevmo_search:args:', e.args)
-        print ('bevmo_search:exiting program due to error')
-        saveBrowserContent( bevmo_driver, 'bevmo', 'bevmo_search')
+        exceptionPrint( e, 'bevmo_search', 'ERROR:entering search string:'+srchstring, True, bevmo_driver, 'bevmo', 'bevmo_search' )
         return []
     
     # create the array that we will add to
     found_wines = []
 
-    # debugging
-    pausetime = 5
-    if verbose > 0:
-        print ('bevmo_search:pause ', pausetime, ' sec to allow search results to return')
-    # put a minor pause
-    time.sleep(pausetime)
+    # we are looking for results page
+    results=find_elements_looped( bevmo_driver, 'department-breadcrumb', 'by_class_name', 'bevmo_search', 'waiting on search response')
+    # if we don't have results - we have problme
+    if not results:
+        if pmsg: print('bevmo_search:ERROR:did not receive results - return noWine:', srchstring)
+        logger.info('ERROR:did not receive results - return noWine:%s', srchstring)
+        # update the website we are pointing at
+        bevmo_driver.get('https://www.bevmo.com')
+        if pmsg: print('bevmo_search:page refreshed to:www.bevmo.com')
+        if pmsg: print('bevmo_search:', srchstring, ':returned records: 0')
+        logger.info('page refreshed to:www.bevmo.com')
+        logger.info(rtnrecfmt, srchstring, 0)
+        # return a record that says we could not find the record
+        return returnNoWineFound( winestore )
+        
+    
+    # now look for no result or result
+    noresults =  bevmo_driver.find_elements_by_class_name('fp-product-not-found')
+    results =  bevmo_driver.find_elements_by_class_name('fp-item-content')
+    loopcnt = 4
+    while not noresults and not results and loopcnt:
+        if pmsg: print('bevmo_search:waiting for results post breadcrumbs to show up:', loopcnt)
+        logger.info('waiting for results post breadcrumbs to show up:%d', loopcnt)
+        time.sleep(2)
+        loopcnt -= 1
+        noresults =  bevmo_driver.find_elements_by_class_name('fp-product-not-found')
+        results =  bevmo_driver.find_elements_by_class_name('fp-item-content')
 
-    # first test - see if we got no results found - if so return the empty array
-    try:
-        if bevmo_driver.find_element_by_class_name('fp-product-not-found'):
-            if verbose > 0:
-                print ('bevmo_search:', srchstring, ':no results returned - refresh the page we are looking at')
-            # update the website we are pointing at
-            bevmo_driver.get('https://www.bevmo.com')
-            # debugging
-            if verbose > 0:
-                print ('bevmo_search:page refreshed to:www.bevmo.com')
-                print ('bevmo_search:returned:',noWineFound)
-            # return a record that says we could not find the record
-            return [ noWineFound ]
-        else:
-            # debugging
-            if verbose > 1:
-                print('bevmo_search:did not error when searching for fp-product-not-found:' + srchstring)
-    except NoSuchElementException:
-        # debugging
-        if verbose > 1:
-            print ('bevmo_search:fp-product-not-found does not exist - there must be results')
-    except NoSuchWindowException as e:
-        print ('bevmo_search:window unexpectantly closed - error:', str(e))
-        if waitonerror:
-            input()
-        else:
-            exitWithError()
-    except  Exception as e:
-        print ('bevmo_search:fp-product-not-found - not found for (' + srchstring + ') - results were found (expected) - error:', str(e))
-        print ('bevmo_search:type:', type(e))
-        print ('bevmo_search:args:', e.args)
-        print ('bevmo_search:exiting program due to error')
-        saveBrowserContent( bevmo_driver, 'bevmo', 'bevmo_search')
-        return []
-        # exitWithError()
 
-    # get results back and look for the thing we are looking for - the list of things we are going to process
-    winelist = bevmo_driver.find_elements_by_class_name('fp-item-content')
+    # if no results
+    if noresults:
+        if pmsg: print('bevmo_search:', srchstring, ':no results returned - refresh the page we are looking at')
+        logger.info('no results returned - refresh the page we are looking at:%s', srchstring)
+        # saveBrowserContent( bevmo_driver, 'bevmo', 'bevmo_search')
+        # update the website we are pointing at
+        bevmo_driver.get('https://www.bevmo.com')
+        logger.info('page refreshed to:www.bevmo.com')
+        logger.info(rtnrecfmt, srchstring, 0)
+        # return a record that says we could not find the record
+        return returnNoWineFound( winestore )
+
     
     # debugging
-    print('bevmo_search:', srchstring, ':returned records:',  len(winelist))
+    if pmsg: print('bevmo_search:', srchstring, ':returned records:',  len(results))
+    logger.info(rtnrecfmt, srchstring, 0)
 
     # now loop through the wines we found
-    for index in range(len(winelist)):
-        # get the values of interest from this section of the page
-        rec =  bevmo_extract_wine_from_DOM(index,winelist)
+    for index in range(len(results)):
+        try:
+            # get the values of interest from this section of the page
+            rec =  bevmo_extract_wine_from_DOM(winestore,index,results)
+        except Exception as e:
+            # we expect this to fail here so lets just deal with it
+            if pmsg: print('bevmo_search:ERROR:bevmo_extract_wine_from_DOM:', srchstring)
+            logger.warning('bevmo_extract_wine_from_DOM:%s', srchstring)
+            saveBrowserContent( driver, 'bevmo', 'bevmo_search:bevmo_extract_wine_from_DOM' )
+            rec = None
+            break
+        
         # if we were not out of stock, save teh record
         if rec:
             found_wines.append( rec )
         # debugging
-        if verbose > 1:
-            print('rec:', rec)
+        logger.debug('rec:%s', rec)
 
     # debugging
-    if verbose > 5:
-        print ('bevmo_search:found_wines:',found_wines)
+    if pmsg: print('bevmo_search:found_wines:',len(found_wines))
+    logger.info(rtnrecfmt, srchstring, len(found_wines))
 
     # if we did not find any wines - send back that we did not find any wines
     if not found_wines:
-        if verbose > 1:
-            print ('bevmo_search:found not wines - fill found_wines with that value')
-        # set the return value to found no wines
-        found_wines.append( noWineFound )
+        logger.info('no results returned - refresh the page we are looking at:%s', srchstring)
+        # saveBrowserContent( bevmo_driver, 'bevmo', 'bevmo_search')
+        # update the website we are pointing at
+        bevmo_driver.get('https://www.bevmo.com')
+        logger.info('page refreshed to:www.bevmo.com')
+        logger.info(rtnrecfmt, srchstring, 0)
+        return returnNoWineFound( winestore )
 
     # update the website we are pointing at
-    print ('bevmo_search:', srchstring, ':results found:refresh the page we are looking at')
+    if pmsg: print('bevmo_search:refresh the page we are looking at')
+    logger.info('bevmo_search:refresh the page we are looking at')
     bevmo_driver.get('https://www.bevmo.com')
 
     # return the wines we found
     return found_wines
 
 # if we don't get the age dialogue - get the select store dialogue
-def set_bevmo_store_nopopup(driver, waitonerror=False):
+def set_bevmo_store_nopopup(driver):
     try:
-        print('set_bevmo_store_nonpopup:no-21:click-select-store')
+        if pmsg: print('set_bevmo_store_nonpopup:no-21:click-select-store')
+        logger.info('no-21:click-select-store')
         selectStoreBtns = driver.find_elements_by_class_name('fp-store-label')
         for selectStoreBtn in selectStoreBtns:
             if selectStoreBtn.is_displayed():
                 selectStoreBtn.click()
                 return True
     except:
-        print('set_bevmo_store_nopopup:did not find classname:fp-store-label')
+        if pmsg: print('set_bevmo_store_nopopup:did not find classname:fp-store-label')
+        logger.error('did not find classname:fp-store-label')
         # did not find what we were looking for
-        if waitonerror:
-            input()
-        else:
-            exitWithError()
+        exitWithError()
         return None
 
 # function to create a selenium driver for bevmo and get past the store selector
-def create_bevmo_selenium_driver(defaultstore, defaultstoreid, retrycount=0, waitonerror=False):
+def create_bevmo_selenium_driver(defaultstore, defaultstoreid, retrycount=0):
     loopcnt = retrycount + 1
     while(loopcnt):
         try:
-            return create_bevmo_selenium_driver_worker(defaultstore, defaultstoreid, waitonerror=False)
+            return create_bevmo_selenium_driver_worker(defaultstore, defaultstoreid)
         except  Exception as e:
-            print('create_bevmo_selenium_driver:loopcnt:',loopcnt,':failed-try again')
-            print('create_bevmo_selenium_driver:error:', str(e))
-            print('create_bevmo_selenium_driver:type:', type(e))
-            print('create_bevmo_selenium_driver:args:', e.args)
+            exceptionPrint( e, 'create_bevmo_selenium_driver', ':loopcnt:'+str(loopcnt) )
             loopcnt -= 1
 
     # all loops failed - give up on bevmo
-    print('create_bevmo_selenium_driver:failed-all-attempts:skip-bevmo')
+    if pmsg: print('create_bevmo_selenium_driver:failed-all-attempts:skip-bevmo')
+    logger.info('failed-all-attempts:skip-bevmo')
     return None
     
+
+def bevmo_find_selected_store( driver ):        
+    selectedstores = driver.find_elements_by_class_name('fp-store-label')
+    storetext=''
+    for stores in selectedstores:
+        if stores.text: 
+            storetext=stores.text
+    loopcnt=4
+    while not storetext and loopcnt:
+        if pmsg: print('bevmo_driver:waiting for selected store to be shown:', loopcnt)
+        logger.info('waiting for selected store to be shown:%d', loopcnt)
+        time.sleep(3)
+        loopcnt -= 1
+        selectedstores = driver.find_elements_by_class_name('fp-store-label')
+        for stores in selectedstores:
+            if stores.text: 
+                storetext=stores.text
+                return storetext
+
+    return storetext
     
 # function to create a selenium driver for bevmo and get past the store selector
-def create_bevmo_selenium_driver_worker(defaultstore, defaultstoreid, waitonerror=False):
+def create_bevmo_selenium_driver_worker(defaultstore, defaultstoreid):
     global verbose
 
-    # debugging
-    if verbose > 0:
-        print('bevmo_driver:start:---------------------------------------------------')
-        print('bevmo_driver:Start up webdriver.Chrome')
-    
     # Using Chrome to access web
-    # driver = webdriver.Chrome()
-    driver=create_chrome_webdriver_w3c_off()
+    driver=create_webdriver_from_global_var('bevmo_driver')
 
     # debugging
-    print ('bevmo_driver:Go to www.bevmo.com web page')
+    if pmsg: print('bevmo_driver:Go to www.bevmo.com web page')
+    logger.info('bevmo_driver:Go to www.bevmo.com web page')
     
     # Open the website
     driver.get('https://www.bevmo.com')
 
     # loop waiting for the modal dialogue to appear
-    modal_found = None
+    modal_found = driver.find_elements_by_class_name('fp-modal-content')
     modal_count_down = 4
-
     while not modal_found and modal_count_down:
-        
-        # 
-        # ok - need to figure this out - but we must wait
-        timewait = 4
-        print ('bevmo_driver:sleep for ' + str(timewait) + ' seconds to allow the storeselect to pop up')
-        time.sleep(timewait)
-
-        # see if we can find this
-        try:
-            modal_found = driver.find_elements_by_class_name('fp-modal-content')
-        except:
-            print('bevmo_driver:did not find modal window yet:', modal_count_down)
-
+        if pmsg: print('create_bevmo_selenium_driver_worker:waiting for web page to render:', modal_count_down)
+        logger.info('waiting for web page to render:%d', modal_count_down)
+        time.sleep(3)
         # decrement the modal count down
         modal_count_down -= 1
+        # search for this again
+        modal_found = driver.find_elements_by_class_name('fp-modal-content')
         
+    # did not find it - return none
+    if not modal_found:
+        if pmsg: print('create_bevmo_selenium_driver_worker:never found model - return None')
+        logger.warning('never found model - return None')
+        return None
 
-    # check for the checkbox
+    
+    # find the checkbox and click it
     try:
-        # test for the form
-        print('bevmo_driver:find i am 21 form')
-        modalform = driver.find_element_by_class_name('modal-content')
-
         # i am 21 checkbox - find check box and fill it in
-        print('bevmo_driver:find i am 21 check box and click')
+        if pmsg: print('bevmo_driver:find i am 21 check box and click')
+        logger.info('bevmo_driver:find i am 21 check box and click')
         checkboxes = driver.find_elements_by_class_name('fp-checkbox')
         for checkbox in checkboxes:
             if checkbox.is_displayed():
-                print('bevmo_driver:wait 2 seconds for screen to make box clickable')
+                if pmsg: print('bevmo_driver:wait 2 seconds for screen to make box clickable')
+                logger.info('bevmo_driver:wait 2 seconds for screen to make box clickable')
                 time.sleep(2)
                 checkbox.click()
                 break
         else:
-            print('bevmo_driver:21 checkbox cnt:', len(checkboxes), ':none were displayed')
+            if pmsg: print('bevmo_driver:21 checkbox cnt:', len(checkboxes), ':none were displayed')
+            logger.warning('no 21 checkbox is_displayed - box cnt:%d', len(checkboxes))
             return None
 
     except  Exception as e:
-        print('bevmo_driver:failed i am 21 check')
-        print ('bevmo_driver:error:', str(e))
-        print ('bevmo_driver:type:', type(e))
-        print ('bevmo_driver:args:', e.args)
-        set_bevmo_store_nopopup(driver, waitonerror)
+        exceptionPrint( e, 'bevmo_driver', 'failed i am 21 checkbox click', True, bevmo_driver, 'bevmo', 'bevmo_driver' )
+        if pmsg: print('bevmo_driver:calling:set_bevmo_store_nopopup')
+        logger.warning('exception-now calling:set_bevmo_store_nopopup')
+        set_bevmo_store_nopopup(driver)
 
+
+    # now we need to web page to update so loop until we see it
+    errorsent = driver.find_elements_by_class_name('fp-error')
+    if errorsent and errorsent[0].text != '':
+        if pmsg: print('bevmo_driver:got an error:', errorsent[0].text)
+        logger.warning('bevmo_driver:got an error:%s', errorsent[0].text)
+        return None
+    
     # sleep for 1 second to allow page to respond
+    if pmsg: print('bevmo_driver:wait for 1 second')
+    logger.info('bevmo_driver:wait for 1 second')
     time.sleep(1)
 
     # select the store we want to work with
     try:
         # pick up at the store
-        print('bevmo_driver:find and click pickup at store')
+        if pmsg: print('bevmo_driver:find and click pickup at store')
+        logger.info('find and click pickup at store')
         buttons=driver.find_elements_by_class_name('btn-primary')
-        print ('bevmo_driver:number of buttons:', len(buttons))
+        if pmsg: print('bevmo_driver:number of buttons:', len(buttons))
+        logger.info('number of buttons:%d', len(buttons))
         for button in buttons:
             if button.get_attribute('data-action') == 'change-pickup':
-                print('bevmo_driver:clicking button with text:', button.text)
-                print('bevmo_driver:is button displayed:', button.is_displayed())
-                print('bevmo_driver:before-clicking-button:saving-browser-for-debugging')
-                saveBrowserContent( driver, 'bevmo', 'bevmo_driver-click-button' )
+                if pmsg: print('bevmo_driver:clicking button with text:', button.text)
+                if pmsg: print('is button displayed:%s', button.is_displayed())
+                logger.info('bevmo_driver:clicking button with text:%s', button.text)
+                logger.info('is button displayed:%s', button.is_displayed())
+                # print('bevmo_driver:before-clicking-button:saving-browser-for-debugging')
+                # saveBrowserContent( driver, 'bevmobtn', 'bevmo_driver:click-button' )
                 time.sleep(1)
                 button.click()
-                print('bevmo_driver:button successfully clicked')
-        
+                if pmsg: print('bevmo_driver:button successfully clicked-break out of loop')
+                logger.info('button successfully clicked-break out of loop')
+                break
+            
     except  Exception as e:
         # we expect this to fail here so lets just deal with it
-        print('bevmo_driver:failed and expected - sleep 20 seconds')
+        if pmsg: print('bevmo_driver:failed and expected - sleep 20 seconds')
+        logger.info('failed and expected - sleep 20 seconds')
         time.sleep(20)
-        saveBrowserContent( driver, 'bevmo', 'bevmo_search-btn-primary' )
+        saveBrowserContent( driver, 'bevmo', 'bevmo_driver:btn-primary-failed' )
 
-    print('bevmo_driver:now looking to select our preferred store')
+    # now we need to web page to update so loop until we see it
+    errorsent = driver.find_elements_by_class_name('fp-error')
+    if errorsent and errorsent[0].text != '':
+        if pmsg: print('bevmo_driver:got an error:', errorsent[0].text)
+        logger.warning('got an error:%s', errorsent[0].text)
+        return None
+
+
+    if pmsg: print('bevmo_driver:now looking to select our preferred store')
+    logger.info('now looking to select our preferred store')
     try:
-        # loop enough times to allow for the page to refresh
-        loopcnt=4
-        while(loopcnt):
-            # wait 
-            print('bevmo_driver:wait 5 secs for stores to display')
-            time.sleep(5)
-
-            # see if the critical field is there and displayed
-            searchbtns = driver.find_elements_by_class_name('fp-btn-search')
-
-            # no buttons found - just loop
-            if not searchbtns:
-                print('bevmo_driver:search button does not exist yet:loop again:', loopcnt)
-                loopcnt -= 1
-                continue
-
-            # assume we are going to loop decrement the loopcnt
-            loopcnt -= 1
-
-            # now see if we are just done
-            print('bevmo_driver:number of searchbtns:', len(searchbtns))
-            for searchbtn in searchbtns:
-                # print('bevmo_driver:searchbtn-text:', searchbtn.text)
-                if searchbtn.is_displayed():
-                    print('bevmo_driver:search button found - continue processing')
-                    loopcnt = 0
-                    break
-
-            # we did not find the button - communicate this
-            if loopcnt:
-                print('bevmo_driver:search button not visible:loop again:', loopcnt)
-                
-
-        # loop enough times to allow for the page to refresh
-        loopcnt=4
-        while(loopcnt):
-            # find the object to put the default store into
-            print('bevmo_driver:find field to enter store info:fp-input-q')
-            zipboxes = driver.find_elements_by_name('fp-input-q')
-            print('bevmo_driver:count of zipboxes:', len(zipboxes))
-            if not zipboxes:
-                print('bevmo_driver:saving-browser-for-debugging:no ziboxes were found:loopcnt:', loopcnt)
-                saveBrowserContent( driver, 'bevmo', 'bevmo_search_fp-btn-mystore' )
-                loopcnt -= 1
-                # wait 
-                print('bevmo_driver:wait 5 secs for stores to display')
-                time.sleep(5)
-            else:
-                loopcnt = 0
-
-        # with or without zipboxes
-        index=0
+        # find the input field for zipboxes
+        zipboxes = find_elements_looped( driver, 'fp-input-q', 'by_name', 'bevmo_driver', 'waiting for webpage to display input field', loopcnt=6)
+        if not zipboxes:
+            if pmsg: print('bevmo_driver:never found the input field - returning None')
+            logger.warning('never found the input field - returning None')
+            return None
+        
+        # now find the displayed version of this input
         for zipbox in zipboxes:
-            try:
-                if zipbox.is_displayed():
-                    print('bevmo_driver:found zipbox displayed')
-                    break
-                else:
-                    print('bevmo_driver:not displayed:', index)
-                    index += 1
-            except:
-                print('bevmo_driver:zipbox element not attached to the page:', index)
-                index += 1
-        else:
-            print('bevmo_driver:no store inputs are displayed')
+            if zipbox.is_displayed():
+                break
 
+        # check that we found a displayed zipbox
+        if zipbox and not zipbox.is_displayed():
+            if pmsg: print('bevmo_driver:no zip boxes where displayed - return none - count of zipboxes:', len(zipboxes))
+            logger.warning('no zip boxes where displayed - return none - count of zipboxes:%d', len(zipboxes))
+            return None
+        
         # enter the default store
-        print('bevmo_driver:ready to enter store information')
+        if pmsg: print('bevmo_driver:ready to enter store information')
+        logger.info('ready to enter store information')
         zipbox.clear()
-        print('bevmo_driver:enter store-cleared')
+        if pmsg: print('bevmo_driver:enter store-cleared')
+        logger.info('enter store-cleared')
         zipbox.send_keys(defaultstore)
-        print('bevmo_driver:enter store-value')
+        if pmsg: print('bevmo_driver:enter store-value')
+        logger.info('enter store-value')
         zipbox.send_keys(Keys.RETURN)
-        print('bevmo_driver:pressed return')
+        if pmsg: print('bevmo_driver:pressed return')
+        logger.info('pressed return')
 
         # wait 
-        print('bevmo_driver:wait 5 sec for stores to display')
+        if pmsg: print('bevmo_driver:wait 5 sec for stores to display')
+        logger.info('wait 5 sec for stores to display')
         time.sleep(5)
 
         # select the cotinue button of the first one returned
-        print('bevmo_driver:find the store of interest - and click that button')
+        if pmsg: print('bevmo_driver:find the store of interest - and click that button')
+        logger.info('find the store of interest - and click that button')
         buttons=driver.find_elements_by_class_name('fp-btn-mystore')
         for button in buttons:
             if button.get_attribute('data-store-id') == defaultstoreid:
-                print( 'bevmo_driver:clicking button on store:', defaultstoreid )
+                if pmsg: print( 'bevmo_driver:clicking button on store:', defaultstoreid )
+                logger.info('clicking button on store:%s', defaultstoreid )
                 button.click()
 
     except  Exception as e:
-        print ('bevmo_driver:failed selecting store')
-        print ('bevmo_driver:error:', str(e))
-        print ('bevmo_driver:type:', type(e))
-        print ('bevmo_driver:args:', e.args)
-        if waitonerror:
-            input()
-        else:
-            saveBrowserContent( driver, 'bevmo', 'bevmo_search_fp-btn-mystore' )
-            # changed from exist to raise errir
-            print('bevmo_driver:raising error')
-            raise 
-            # we used to exit
-            print('bevmo_driver:should not get here - exitWithError')
-            exitWithError()
-        return None
+        exceptionPrint( e, 'bevmo_driver', 'failed selecting store', True, driver, 'bevmo', 'bevmo_driver-fp-btn-mystore', exitPgm=True )
+
 
     # pause to let screen refresh
-    print('bevmo_driver:pause 3 seconds to allow screen to refresh for selected store')
+    if pmsg: print('bevmo_driver:pause 3 seconds to allow screen to refresh for selected store')
+    logger.info('bevmo_driver:pause 3 seconds to allow screen to refresh for selected store')
     time.sleep(3)
 
     # Test that the store got set correctly
-    # XPATH:  //*[@id="header"]/div[1]/div/div/div/div[2]/div/div/a/span[1]
-    print('bevmo_driver:see what store was selected')
-    selectedstores = driver.find_elements_by_class_name('fp-store-label')
-    print('bevmo_driver:count of selectedstores:', len(selectedstores))
-    for selectedstore in selectedstores:
-        print('bevmo_driver:selectedstore:', selectedstore.text)
-        if selectedstore.is_displayed():
-            print('bevmo_driver:selected store name:', selectedstore.text)
-            break
+    storetext=''
+    if pmsg: print('bevmo_driver:see what store was selected')
+    logger.info('see what store was selected')
+    try:
+        storetext = bevmo_find_selected_store( driver )
+    except Exception as e:
+        exceptionPrint( e, 'bevmo_driver', 'failed lookup up selected store', True, driver, 'bevmo', 'bevmo_driver-store-lookup' )
+        if pmsg: print('bevmo_driver:refresh screen and look for store again')
+        logger.info('refresh screen and look for store again')
+        driver.get('https://www.bevmo.com')
 
+    if not storetext:
+        storetext = bevmo_find_selected_store( driver )
+                
+    if storetext:
+        if pmsg: print('bevmo_driver:selected store name:', storetext)
+        logger.info('selected store name:%s', storetext)
+    
     # debugging
-    if verbose > 0:
-        print('bevmo_driver:complete:---------------------------------------------------')
+    if pmsg: print('bevmo_driver:complete:---------------------------------------------------')
+    logger.info('complete:---------------------------------------------------')
     
     # return the driver
     return driver
@@ -894,18 +1057,85 @@ def create_bevmo_selenium_driver_worker(defaultstore, defaultstoreid, waitonerro
 
 #### TOTALWINE ####
 
+# create email to tell the person to interact
+def totalwine_action_email( optiondict={} ):
+    if 'EmailFromAddr' not in optiondict:
+        if pmsg: print('totalwine_action_email:ERROR:optiondict not populated - no message sent out')
+        logger.warning('optiondict not populated - no message sent out')
+        return
+
+    if pmsg: print('totalwine_action_email:sending out message')
+    m = kvgmailsend.GmailSend( optiondict['EmailFromAddr'], optiondict['EmailFromPassword'] )
+    m.addRecipient( optiondict['EmailToAddr'] )
+    m.setSubject( optiondict['EmailSubject'] )
+    m.setTextBody( optiondict['EmailBody'] )
+    m.send()
+    if pmsg: print('totalwine_action_email:message sent!')
+    logger.info('message sent!')
+
+# check to see if we encountered the robot and if so - then we need to interact with it to get past it
+def totalwine_robot_check(driver, calledby, optiondict={}):
+    # validate we are not being checked out for being a robot
+    totalwine_driver = driver
+    robot_check = totalwine_driver.find_elements_by_class_name('page-title')
+    
+    # return if we did not find the problem
+    if not len(robot_check):
+        return False
+
+    # we got to the page - send out the amil
+    totalwine_action_email( optiondict )
+
+    # bring the brower to front and center
+    if pmsg: print(calledby+':maximizing windows')
+    logger.info('%s:maximizing windows', calledby)
+    driver.maximize_window()
+
+    # display a message
+    try:
+        if pmsg: print(calledby+':robot_check:', robot_check[0].text)
+        if pmsg: print(calledby+':please fill out the robot form and this program will continue')
+        logger.info('%s:robot_check:%s', calledby, robot_check[0].text)
+        logger.info('%s:please fill out the robot form and this program will continue', calledby)
+    except:
+        if pmsg: print(calledby+':robot_check:fill it out but we could not display the text')
+        logger.info('%s:robot_check:fill it out but we could not display the text',calledby)
+
+
+    # loop until the user resolves this issue
+    loopcnt = 1
+    while( len(robot_check) ):
+        # then update the display
+        if pmsg: print(calledby+':loopcnt:', loopcnt)
+        logger.info('%s:loopcnt:%d', calledby, loopcnt)
+        loopcnt += 1
+        #input()
+        # sleep 5 minutes
+        if pmsg: print(calledby+':sleep for 3 minutes starts at:', time.ctime())
+        logger.info('%s:sleep for 3 minutes starts at:%s', calledby, time.ctime())
+        time.sleep(60*3)
+        # check again to see it as cleared
+        robot_check = totalwine_driver.find_elements_by_class_name('page-title')
+
+    # cleared the issue - return true
+    if pmsg: print(calledby+':problem cleared at:', time.ctime())
+    logger.info('%s:problem cleared at:%s', calledby, time.ctime())
+    # removed the save browser code for robots
+    # saveBrowserContent( totalwine_driver, 'totalwine', 'totalwine_robot' )
+    return True
+
 
 # function used to extract the data from the DOM that was returned
-def totalwine_extract_wine_from_DOM(index,titlelist,pricelist,sizelist,fldmatch):
+def totalwine_extract_wine_from_DOM(winestore,index,titlelist,pricelist,sizelist,fldmatch):
     
     # extract the values
     winename = titlelist[index].text 
     wineprice = pricelist[index].text
 
-    # print('totalwine_extract_wine_from_DOM:',wineprice)
+    # if pmsg: print('totalwine_extract_wine_from_DOM:',wineprice)
 
     # size is pulled out based on what fldmatch solution we have
-    if fldmatch == 'searchPageContainer':
+    if fldmatch in ('searchPageContainer', 'resultCount__1rzUJ1mi'):
         # size is in the name field
         try:
             winename,winesize = winename.split('\n')
@@ -923,60 +1153,70 @@ def totalwine_extract_wine_from_DOM(index,titlelist,pricelist,sizelist,fldmatch)
     match = re.search('\$\s*(.*)$',wineprice)
     if ('\n' in wineprice):
         wineprice = wineprice.split('\n')[0]
-        #print('totalwine_extract_wine_from_DOM:split price:',wineprice)
+        #if pmsg: print('totalwine_extract_wine_from_DOM:split price:',wineprice)
     elif ('bottle' in wineprice):
         wineprice = wineprice.split(' ')[0]
     elif match:
         wineprice = match.group(1)
-        #print('totalwine_extract_wine_from_DOM:match on price',wineprice)
+        #if pmsg: print('totalwine_extract_wine_from_DOM:match on price',wineprice)
     
     # now clean up $ and ,
     wineprice = wineprice.replace('$','').replace(',','')
     
     # return the dictionary
-    return { 'wine_store' : 'TotalCA', 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : '' }
+    return { 'wine_store' : winestore, 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : winestore }
 
 
-# Search for the wine
-def totalwine_search( srchstring, totalwine_driver ):
-    global verbose
-
-    # create the array that we will add to
-    found_wines = []
-
+# run the code that performs the search
+def totalwine_search_lookup( srchstring, totalwine_driver, optiondict ):
+    # get to the search page by refreshing the screen
     loopcnt = 4
     while(loopcnt):
 
         # debugging
-        print('totalwine_search:go to search page:www.totalwine.com')
+        if pmsg: print('totalwine_search_lookup:go to search page:www.totalwine.com')
+        logger.info('go to search page:www.totalwine.com')
 
         # force the page to start at the top of the page
         totalwine_driver.get('https://www.totalwine.com/')
 
+        # validate we are not being checked out for being a robot
+        totalwine_robot_check(totalwine_driver,'totalwine_search_lookup', optiondict )
+
         # debugging
-        print('totalwine_search:find the search_box')
+        if pmsg: print('totalwine_search_lookup:find the search_box')
+        logger.info('find the search_box')
+
         
         # Select the search box(es) and find if any are visbile - there can be more than one returned value
         try:
-            search_box = totalwine_driver.find_element_by_xpath('//*[@id="header-search-text"]')
-            print ('totalwine_search:search box found:header-search-text')
+            search_box = totalwine_driver.find_element_by_xpath('//*[@id="at_searchProducts"]')
+            if pmsg: print('totalwine_search_lookup:search box found:at_searchProducts')
+            logger.info('search box found:at_searchProducts')
             loopcnt = 0
         except Exception as e:
-            print('totalwine_search:failed to find:header-search-text')
+            if pmsg: print('totalwine_search_lookup:ERROR:failed to find:at_searchProducts:loopcnt:', loopcnt)
+            logger.warning('failed to find:at_searchProducts:loopcnt:%d', loopcnt)
             # try a different way
             try:
-                search_box = totalwine_driver.find_element_by_xpath('//*[@id="at_searchProducts"]')
-                print ('totalwine_search:search box found:at_searchProducts')
+                search_box = totalwine_driver.find_element_by_xpath('//*[@id="header-search-text"]')
+                if pmsg: print('totalwine_search_lookup:search box found:header-search-text')
+                logger.info('search box found:header-search-text')
                 loopcnt = 0
             except Exception as e:
-                print ('totalwine_search:failed to find:at_searchProducts:loopcnt:', loopcnt)
-                saveBrowserContent( totalwine_driver, 'totalwine', 'totalwine_search' )
-                print('totalwine_search:could not find search box after both lookups:loopcnt:', loopcnt)
+                if pmsg: print('totalwine_search_lookup:failed to find:header-search-text:loopcnt:', loopcnt)
+                if pmsg: print('totalwine_search_lookup:ERROR:failed to find:at_searchProducts:loopcnt:', loopcnt)
+                logger.info('failed to find:header-search-text:loopcnt:%d', loopcnt)
+                logger.info('failed to find:at_searchProducts:loopcnt:%d', loopcnt)
+                saveBrowserContent( totalwine_driver, 'totalwine', 'totalwine_search_lookup' )
+                if pmsg: print('totalwine_search_lookup:could not find search box after both lookups:loopcnt:', loopcnt)
+                logger.info('could not find search box after both lookups:loopcnt:%d', loopcnt)
                 loopcnt -= 1
 
     # check that we got a search box
     if not search_box:
-        print('totalwine_search:failed to find a search box')
+        if pmsg: print('totalwine_search_lookup:failed to find a search box')
+        logger.error('totalwine_search_lookup:failed to find a search box')
         exitWithError()
         pass
 
@@ -984,91 +1224,218 @@ def totalwine_search( srchstring, totalwine_driver ):
     # first check to see that the search box is displayed - if not visible then click the bottom that makes it visible
     if not search_box.is_displayed():
         # debugging
-        print ('totalwine_search:search box is not displayed - we want to click the button that displays it')
+        if pmsg: print('totalwine_search_lookup:search box is not displayed - we want to click the button that displays it')
+        logger.info('search box is not displayed - we want to click the button that displays it')
         # make the search box visible if it is not
         try:
             totalwine_driver.find_element_by_xpath('//*[@id="header-search-mobile"]/span').click()
         except Exception as e:
-            print('totalwine_search:could not find search box after both lookups')
-            saveBrowserContent( totalwine_driver, 'totalwine', 'totalwine_search' )
-            exitWithError()
-            pass
+            exceptionPrint( e, 'totalwine_search_lookup', 'ERROR:could not find earch box afer both lookups', True, totalwine_driver, 'totalwine', 'totalwine_search_lookup', exitPgm=True )
 
     # debugging
-    print ('totalwine_search:search for:', srchstring)
+    if pmsg: print('totalwine_search_lookup:search for:', srchstring)
+    logger.info('search for:%s', srchstring)
 
     # send in the string to this box and press RETURN
-    search_box.clear()
-    search_box.send_keys(srchstring)
-    search_box.send_keys(Keys.RETURN)
+    try:
+        search_box.clear()
+        search_box.send_keys(srchstring)
+        search_box.send_keys(Keys.RETURN)
+    except:
+        if pmsg: print('totalwine_search_lookup:ERROR:could not send keys to search box:', srchstring)
+        logger.error('could not send keys to search box:', srchstring)
+        saveBrowserContent( totalwine_driver, 'totalwine', 'totalwine_search_lookup' )
+        exitWithError()
+        pass
+        
 
-    
+
+# Search for the wine
+def totalwine_search( srchstring, totalwine_driver, optiondict={} ):
+    global verbose
+
+    winestore = 'TotalCA'
+
+    # create the array that we will add to
+    found_wines = []
+
+    # message
+    if pmsg: print('totalwine_search:calling:totalwine_search_lookup')
+    logger.info('calling:totalwine_search_lookup')
+
+    # call the search
+    totalwine_search_lookup( srchstring, totalwine_driver, optiondict )
+
+    # test to see if we are being checked for a robot again
+    if totalwine_robot_check(totalwine_driver,'totalwine_search:send_keys', optiondict ):
+        if pmsg: print('totalwine_search:got robot - call search lookup again')
+        logger.info('got robot - call search lookup again')
+        totalwine_search_lookup( srchstring, totalwine_driver, optiondict )
+
+
+    # message
+    if pmsg: print('totalwine_search:determining if we got results back')
+    logger.info('determining if we got results back')
+
     # test to see the result count we got back
     returned_recs = None
     loopcnt = 0
     while returned_recs == None:
         # sleep to give page time to fill in
-        print('totalwine_search:pause 0.5 sec to allow the page to fill in')
+        if pmsg: print('totalwine_search:pause 0.5 sec to allow the page to fill in')
+        logger.info('pause 0.5 sec to allow the page to fill in')
         time.sleep(0.5)
 
-        # returned records id field: anProdCount, listCount, searchPageContainer
-        for fldmatch in ('anProdCount','listCount'):
-            print('totalwine_search:fldmatch:',fldmatch)
-            resultsfld = totalwine_driver.find_elements_by_id(fldmatch)
+        
+        # check now for <span class="resultCount__1rzUJ1mi"><span>1 - 18 of 18 results</span></span>
+        # new as of 2020-04-18 - getting the match count
+        if not returned_recs:
+            fldmatch="resultCount__1rzUJ1mi"
+            resultsfld = totalwine_driver.find_elements_by_class_name(fldmatch)
+            if pmsg: print('totalwine_search:check for fldmatch on field:',fldmatch)
+            logger.info('check for fldmatch on field:%s',fldmatch)
             if resultsfld:
-                print('totalwine_search:count found on fld:', fldmatch)
-                print('totalwine_search:count of fld:', len(resultsfld))
-                returned_recs = resultsfld[0].get_attribute('value')
+                if pmsg: print('totalwine_search:count found on fld:', fldmatch)
+                if pmsg: print('totalwine_search:count of fld:', len(resultsfld))
+                logger.info('count found on fld:%s', fldmatch)
+                logger.info('count of fld:%d', len(resultsfld))
+                if resultsfld[0].text == '0 results':
+                    returned_recs = 0
+                    break
+                if not resultsfld[0].text:
+                    if pmsg: print('totalwine_search:ERROR:no value extracted from resultsfld[0].text:', resultsfld[0].text)
+                    logger.error('could not pull split out of this line:%s:', resultsfld[0].text)
+                    logger.info('pulling out the titlelist and get a count from it:title__2RoYeYuO')
+                    titlelist = totalwine_driver.find_elements_by_class_name('title__2RoYeYuO')
+                    returned_recs = len(titlelist)
+                    logger.error('taken from title field result cnt is:%d', returned_recs)
+                    break
+                    
+                try:
+                    returned_recs = resultsfld[0].text.split()[2]
+                except:
+                    if pmsg: print('totalwine_search:ERROR:could not pull split out of this line:', resultsfld[0].text)
+                    logger.error('could not pull split out of this line:%s:', resultsfld[0].text)
+                    # temporary - lets look at the page to see why we could not parse it
+                    saveBrowserContent( totalwine_driver, 'totalwine', 'totalwine_search' )
+
                 break
+
+        if not returned_recs:
+            fldmatch="resultsTitle__2yxTXNeW"
+            resultsfld = totalwine_driver.find_elements_by_class_name(fldmatch)
+            if pmsg: print('totalwine_search:check for fldmatch on field:',fldmatch)
+            logger.info('check for fldmatch on field:%s',fldmatch)
+            if resultsfld:
+                if pmsg: print('totalwine_search:count found on fld:', fldmatch)
+                if pmsg: print('totalwine_search:count of fld:', len(resultsfld))
+                logger.info('count found on fld:%s', fldmatch)
+                logger.info('count of fld:%d', len(resultsfld))
+                if resultsfld[0].text == 'No results':
+                    returned_recs = 0
+                    break
+                try:
+                    returned_recs = resultsfld[0].text.split()[2]
+                except:
+                    if pmsg: print('totalwine_search:ERROR:could not pull split out of this line:', resultsfld[0].text)
+                    logger.error('could not pull split out of this line:%s', resultsfld[0].text)
+                break
+
+        # returned records id field: anProdCount, listCount, searchPageContainer
+        if not returned_recs:
+            for fldmatch in ('anProdCount','listCount'):
+                if pmsg: print('totalwine_search:check for fldmatch on field:',fldmatch)
+                logger.info('check for fldmatch on field:%s',fldmatch)
+                resultsfld = totalwine_driver.find_elements_by_id(fldmatch)
+                if resultsfld:
+                    if pmsg: print('totalwine_search:count found on fld:', fldmatch)
+                    if pmsg: print('totalwine_search:count of fld:', len(resultsfld))
+                    logger.info('count found on fld:%s', fldmatch)
+                    logger.info('count of fld:%d', len(resultsfld))
+                    returned_recs = resultsfld[0].get_attribute('value')
+                    break
 
         # first two fields did not work - see if we are on searchPageContainer
         if not returned_recs:
             fldmatch = 'searchPageContainer'
             resultsfld = totalwine_driver.find_elements_by_id(fldmatch)
+            if pmsg: print('totalwine_search:check for fldmatch on field:',fldmatch)
+            logger.info('check for fldmatch on field:%s',fldmatch)
             if resultsfld:
-                print('totalwine_search:count found on fld:', fldmatch)
-                print('totalwine_search:count of fld:', len(resultsfld))
-                returned_recs = 1
+                # see if we can get the real results
+                try:
+                    # see if we can return the total number of records returned in the search
+                    result = totalwine_driver.find_element_by_xpath('//*[@id="searchPageContainer"]/div[2]/div[1]/div/div[1]')
+                    if pmsg: print('totalwine_search:result:', result.text)
+                    logger.info('result:%s', result.text)
+                    if result:
+                        returned_recs = int(result.text.split(' ')[0]) 
+                except:
+                    if pmsg: print('totalwine_search:did not find the result')
+                    logger.info('did not find the result')
+                    returned_recs = 1
+                if pmsg: print('totalwine_search:count found on fld:', fldmatch)
+                if pmsg: print('totalwine_search:count of fld:', len(resultsfld))
+                if pmsg: print('totalwine_search:count of returned records:', returned_recs)
+                logger.info('count found on fld:%s', fldmatch)
+                logger.info('count of fld:%d', len(resultsfld))
+                logger.info('count of returned records:%d', returned_recs)
 
+
+        # finally check to see if we got a "No results" message back and bail if we did
         if not returned_recs:
-            fldmatch="resultsTitle__drQnygRS"
+            # fldmatch="resultsTitle__drQnygRS" - value worked until 4/18/2020
+            fldmatch="resultsTitle__2yxTXNeW"
             resultsfld = totalwine_driver.find_elements_by_class_name(fldmatch)
+            if pmsg: print('totalwine_search:check for fldmatch on field:',fldmatch)
+            logger.info('check for fldmatch on field:%s',fldmatch)
             if resultsfld:
-                noWineFound =  { 'wine_store' : 'TotalCA', 'wine_name' : 'Sorry no matches were found', 'wine_price' : '1', 'wine_year' : '', 'label' : '' }
-
-                print ('total_search:returned:',noWineFound)
+                if pmsg: print('total_search:', srchstring, ':returned records: 0')
                 # return a record that says we could not find the record
-                return [ noWineFound ]
+                return returnNoWineFound( winestore )
                 
 
         # check to see if we have looped to many times
         if loopcnt > 10:
-            print('totalwine_search:looped too many times - exiting program')
+            if pmsg: print('totalwine_search:ERROR:looped too many times - exiting program')
+            logger.error('looped too many times - exiting program')
             saveBrowserContent( totalwine_driver, 'totalwine', 'totalwine_search' )
             exitWithError()
         else:
             loopcnt += 1
-            print('totalwine_search:loopcnt:',loopcnt)
+            if pmsg: print('totalwine_search:loopcnt:',loopcnt)
+            logger.info('loopcnt:%d',loopcnt)
 
     # check to see if we got no results
     if returned_recs == 0:
-        print('totalwine_search:', srchstring, ':no results returned - refresh the page we are looking at')
+        if pmsg: print('totalwine_search:', srchstring, ':no results returned - refresh the page we are looking at')
+        logger.info('no results returned for:%s', srchstring)
         # update the website we are pointing at
         totalwine_driver.get('https://www.totalwine.com')
         # return a record that says we could not find a record
-        return []
+        return returnNoWineFound( winestore )
+
 
     # debugging
-    print('totalwine_search:', srchstring, ':returned records:', returned_recs)
+    if pmsg: print('totalwine_search:', srchstring, ':returned records:', returned_recs)
+    logger.info(rtnrecfmt, srchstring, returned_recs)
     
     # get results back and look for the thing we are looking for - the list of things we are going to process
     if fldmatch == 'searchPageContainer':
         titlelist = totalwine_driver.find_elements_by_class_name('title__11ZhZ3BZ')
-        availlist = []
-        #mix6list = totalwine_driver.find_elements_by_class_name('plp-product-buy-mix')
+        availlist = totalwine_driver.find_elements_by_class_name('messageHolder__20eUWkhD')
+        #mix6list = totalwine_driver.find_elements_by_class_name('')
         sizelist  = []
         pricelist = totalwine_driver.find_elements_by_class_name('pricingHolder__1VkKua4M')
-
+    elif fldmatch == 'resultCount__1rzUJ1mi':
+        # <h2 class="title__2RoYeYuO titleDown__BwxDDzkX" id="product-117908175-1-0_Title">
+        titlelist = totalwine_driver.find_elements_by_class_name('title__2RoYeYuO')
+        # <div class="messageHolder__1LBm8SMH">
+        availlist = totalwine_driver.find_elements_by_class_name('messageHolder__1LBm8SMH')
+        #mix6list = totalwine_driver.find_elements_by_class_name('')
+        sizelist  = []
+        #<div class="pricingHolder__1ItgGBnd">
+        pricelist = totalwine_driver.find_elements_by_class_name('pricingHolder__1ItgGBnd')
     else:
         titlelist = totalwine_driver.find_elements_by_class_name('plp-product-title')
         availlist = totalwine_driver.find_elements_by_class_name('plp-product-buy-limited')
@@ -1077,109 +1444,106 @@ def totalwine_search( srchstring, totalwine_driver ):
         pricelist = totalwine_driver.find_elements_by_class_name('price')
             
     # debugging
-    print('totalwine_search:Counts:title,avail,size,price,fldmatch:', len(titlelist),len(availlist),len(sizelist),len(pricelist),fldmatch)
+    if pmsg: print('totalwine_search:Counts:title,avail,size,price,fldmatch:', len(titlelist),len(availlist),len(sizelist),len(pricelist),fldmatch)
+    logger.info('Counts:title,avail,size,price,fldmatch:%d:%d:%d:%d:%s', len(titlelist),len(availlist),len(sizelist),len(pricelist),fldmatch)
 
-
-    # debugging
-    if False:
-        print ('titlelist-len:', len(titlelist))
-        print ('availlist-len:', len(availlist))
-        #print ('mix6list-len:', len(mix6list))
-        print ('sizelist-len:', len(sizelist))
-        print ('pricelist-len:', len(pricelist))
 
     # message we have a problem
     if len(titlelist) != len(pricelist):
-        print('totalwine_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        if pmsg: print('totalwine_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        logger.info('price and name lists different length:%s:len(wine):%d:len(price):%d',srchstring,len(titlelist),len(pricelist))
 
     
     # now loop through the wines we found
     for index in range(len(pricelist)):
-        # we don't grab records where they are out of stock
-        if not titlelist[index]:
-            print('totalwine_search:no wine title for this row:row skipped')
-        if len(availlist)==0 or availlist[index] != "This item is out of stock":
-            # this is not out of stock
-            found_wines.append( totalwine_extract_wine_from_DOM(index,titlelist,pricelist,sizelist,fldmatch) )
+        # get the availability string
+        if len(availlist)==0:
+            availstring = ''
+        elif isinstance( availlist[index], str ):
+            availstring = availlist[index]
         else:
-            # show the out of stock entries to the user/log
-            print ('totalwine_search:',titlelist[index],':',availlist[index])
+            availstring = availlist[index].text
 
-    # debugging
-    if verbose > 5:
-        print ('totalwine_search:found_wines:', found_wines)
+        # debugging
+        # if pmsg: print(availstring+':',"Unavailable" not in availstring,'\n')
+
+        # we don't grab records where they are out of stock
+        if not titlelist[index].text:
+            if pmsg: print('totalwine_search:no wine title for this row:row skipped')
+            logger.info('no wine title for this row:row skipped')
+        elif availstring and "Pick Up Out of Stock" in availstring:
+            # show the out of stock entries to the user/log
+            if pmsg: print('totalwine_search:unavailable_wine_skipped:',titlelist[index].text,':unavailable_string:',availstring)
+            logger.info('unavailable_wine_skipped:%s:unavailable_string:%s',titlelist[index].text,availstring)
+        elif availstring and "Pick Up Unavailable" in availstring:
+            # show the out of stock entries to the user/log
+            if pmsg: print('totalwine_search:unavailable_wine_skipped:',titlelist[index].text,':unavailable_string:',availstring)
+            logger.info('unavailable_wine_skipped:%s:unavailable_string:%s',titlelist[index].text,availstring)
+        else:
+            # this is not out of stock
+            found_wines.append( totalwine_extract_wine_from_DOM(winestore,index,titlelist,pricelist,sizelist,fldmatch) )
+
 
     # return the wines we found
     return found_wines
 
 # function to create a selenium driver for totalwine and get past age question
-def create_totalwine_selenium_driver(defaultstore):
+def create_totalwine_selenium_driver(defaultstore, optiondict):
     global verbose
 
-    # debugging
-    if verbose > 0:
-        print('totalwine_driver:start:---------------------------------------------------')
-        print ('totalwine_driver:Start up webdriver.Chrome')
-    
     
     # Using Chrome to access web
-#    driver = webdriver.Chrome()
-    driver=create_chrome_webdriver_w3c_off()
+    driver=create_webdriver_from_global_var('totalwine_driver')
 
     # debugging
-    print ('totalwine_driver:Go to www.totalwine.com web page')
+    if pmsg: print('totalwine_driver:Go to www.totalwine.com web page')
+    logger.info('Go to www.totalwine.com web page')
     
     # Open the website
     driver.get('https://www.totalwine.com')
 
     # sleep to allow the dialogue to come up
-    print ('totalwine_driver:sleep 1 to allow popup to appear')
+    if pmsg: print('totalwine_driver:sleep 1 to allow popup to appear')
+    logger.info('sleep 1 to allow popup to appear')
     time.sleep(1)
+
+    # check for robot
+    totalwine_robot_check(driver,'totalwine_driver', optiondict)
 
     # check for the button being visible
     try:
         if driver.find_element_by_xpath('//*[@id="btnYes"]'):
-            print ('totalwine_driver:found the yes button')
+            if pmsg: print('totalwine_driver:found the yes button')
+            logger.info('found the yes button')
             if driver.find_element_by_xpath('//*[@id="btnYes"]').is_displayed():
-                print ('totalwine_driver:button is visible-click to say yes')
+                if pmsg: print('totalwine_driver:button is visible-click to say yes')
+                logger.info('button is visible-click to say yes')
                 driver.find_element_by_xpath('//*[@id="btnYes"]').click()
     except:
-        print('totalwine_driver:no age button displayed - moving along')
+        if pmsg: print('totalwine_driver:no age button displayed - moving along')
+        logger.info('no age button displayed - moving along')
 
     # check to see if we are set to the store of interest (don't pass default - we want a blank if we don't find this)
     store_name = totalwine_driver_get_store(driver)
 
     # debugging
-    print ('totalwine_driver:current store_name:', store_name)
-
-    ### Block out
-    if 0:
-        # if we get choose store - go to page and test again
-        if store_name == 'Choose a location':
-            # debugging
-            print('totalwine_driver:get_page:www.totalwine.com/store-finder')
-            
-            # now change the store we are working with
-            driver.get('https://www.totalwine.com/store-finder')
-            
-            # check on store_name again
-            store_name = totalwine_driver_get_store(driver)
-            
-            # debugging
-            print ('totalwine_driver:current store_name:', store_name)
-    ### endif Block out
-
+    if pmsg: print('totalwine_driver:current store_name:', store_name)
+    logger.info('current store_name:%s', store_name)
+    
     # test to see if store matches current store
     if not re.search(defaultstore, store_name):
         # debugging
-        print ('totalwine_driver:current store not set to:', defaultstore, ':set the store')
+        if pmsg: print('totalwine_driver:current store not set to:', defaultstore, ':set the store')
+        logger.info('current store not set to:%s', defaultstore)
         store_name = totalwine_driver_set_store(driver, defaultstore)
-        print ('totalwine_driver:new store_name:', store_name)
+        logger.info('new store_name:%s', store_name)
     else:
-        print('totalwine_driver:store set to default')
+        if pmsg: print('totalwine_driver:store set to default')
+        logger.info('store set to default:%s', defaultstore)
             
     # debugging
-    print('totalwine_driver:complete:---------------------------------------------------')
+    if pmsg: print('totalwine_driver:complete:---------------------------------------------------')
+    logger.info('complete:---------------------------------------------------')
     
     # return the driver
     return driver
@@ -1190,57 +1554,72 @@ def totalwine_driver_get_store(driver, defaultstore=''):
     # class checks first
     for classname in ('anGlobalStore', 'header-store-details'):
         try:
-            print('totalwine_driver_get_store:check_for_class_name:', classname) 
+            if pmsg: print('totalwine_driver_get_store:check_for_class_name:', classname) 
+            logger.info('check_for_class_name:%s', classname) 
             store = driver.find_elements_by_class_name(classname)
             if store:
-                print('totalwine_driver_get_store:class_name:', classname, ':type:', type(store))
+                if pmsg: print('totalwine_driver_get_store:class_name:', classname, ':type:', type(store))
+                logger.info('class_name:%s:type:%s', classname, type(store))
                 if not isinstance(store,list):
                     # not a list - just pull the value (and lets us know if that value is displayed)
-                    print('totalwine_driver_get_store:class_name:', classname, ':not_list:is_displayed:', store.is_displayed())
+                    if pmsg: print('totalwine_driver_get_store:class_name:', classname, ':not_list:is_displayed:', store.is_displayed())
+                    logger.info('class_name:%s:not_list:is_displayed:%s', classname, store.is_displayed())
                     store_name = store.get_attribute('innerText')
                 else:
                     # it is a list - we need to figure out which one we want to use
-                    print('totalwine_driver_get_store:class_name:', classname, ':number of matches:', len(store))
+                    if pmsg: print('totalwine_driver_get_store:class_name:', classname, ':number of matches:', len(store))
+                    logger.info('class_name:%s:number of matches:%d', classname, len(store))
                     # set it to the first match even if not displayed and then override that if we find a displayed value
                     store_name = store[0].get_attribute('innerText')
                     # loop through entries looking for one that is displaying
                     for i in range(len(store)):
-                        print('totalwine_driver_get_store:class_name:', classname, ':', i, ':is_displayed:', store[i].is_displayed())
+                        if pmsg: print('totalwine_driver_get_store:class_name:', classname, ':', i, ':is_displayed:', store[i].is_displayed())
+                        logger.info('class_name:%s:%d::is_displayed:%s', classname, i, store[i].is_displayed())
                         if store[i].is_displayed():
                             store_name = store[i].get_attribute('innerText')
-                            print('totalwine_driver_get_store:class_name:', classname, ':found displayed value:set store_name and break out')
+                            if pmsg: print('totalwine_driver_get_store:class_name:', classname, ':found displayed value:set store_name and break out')
+                            logger.info('found displayed value:set store_name and break out:class_name:%s', classname)
                             break
-                print('totalwine_driver_get_store:anGlobalStore found-capturing the name:', store_name)
+                if pmsg: print('totalwine_driver_get_store:anGlobalStore found-capturing the name:', store_name)
+                logger.info('anGlobalStore found-capturing the name:%s', store_name)
                 # get the store attribute
                 return store_name.replace('\t','')
         except Exception as e:
-            print('totalwine_driver_get_store:ERROR:anGlobalStore:', str(e))
+            if pmsg: print('totalwine_driver_get_store:ERROR:anGlobalStore:', str(e))
+            logger.warning('anGlobalStore:', str(e))
     
     # debugging - did not find the store
-    print('totalwine_driver_get_store:did not find store using class_name')
+    if pmsg: print('totalwine_driver_get_store:did not find store using class_name')
+    logger.info('did not find store using class_name')
 
     # now pull the name that is the name of the current store
     for idname in ('globalStoreName_desktop', 'globalStoreName', 'globalStoreName_mobile'):
         try:
-            print('totalwine_driver_get_store:check_for_xpath:', idname)
+            if pmsg: print('totalwine_driver_get_store:check_for_xpath:', idname)
+            logger.info('check_for_xpath:%s', idname)
             store = driver.find_element_by_xpath('//*[@id="' + idname + '"]')
             if store:
-                # print('totalwine_driver_get_store:', idname, ':type:', type(store))
                 if not isinstance(store,list):
-                    print('totalwine_driver_get_store:', idname, ':store:is_displayed:', store.is_displayed())
+                    if pmsg: print('totalwine_driver_get_store:', idname, ':store:is_displayed:', store.is_displayed())
+                    logger.info('%s:store:is_displayed:%s', idname, store.is_displayed())
                     store_name = store.get_attribute('innerText')
                 else:
-                    print('totalwine_driver_get_store:', idname, ':number of matches:', len(store))
+                    if pmsg: print('totalwine_driver_get_store:', idname, ':number of matches:', len(store))
+                    logger.info('%s:number of matches:%d', idname, len(store))
                     for i in range(len(store)):
-                        print(idname, ':', i, ':is_displayed:', store[i].is_displayed())
+                        if pmsg: print(idname, ':', i, ':is_displayed:', store[i].is_displayed())
+                        logger.info('%s:%d:is_displayed:%s', idname, i, store[i].is_displayed())
                     store_name = store[0].get_attribute('innerText')
-                print('totalwine_driver_get_store:', idname, ':found-capturing name:', store_name)
+                if pmsg: print('totalwine_driver_get_store:', idname, ':found-capturing name:', store_name)
+                logger.info('%s:found-capturing name:%s', idname, store_name)
                 # get the store attribute
                 return store_name
         except Exception as e:
-            print('totalwine_driver_get_store:ERROR:', idname, ':', str(e))
+            if pmsg: print('totalwine_driver_get_store:ERROR:', idname, ':', str(e))
+            logger.warning('%s:%s', idname, str(e))
     
-    print('totalwine_driver_get_store::did not find the name - setting return value to defaultstore:', defaultstore)
+    if pmsg: print('totalwine_driver_get_store::did not find the name - setting return value to defaultstore:', defaultstore)
+    logger.info('did not find the name - setting return value to defaultstore:%s', defaultstore)
     return defaultstore
 
 # change the store the website is configured to search
@@ -1248,7 +1627,8 @@ def totalwine_driver_set_store(driver, defaultstore):
     global verbose
 
     # debugging
-    print('totalwine_driver_set_store:get:www.totalwine.com/store-finder')
+    if pmsg: print('totalwine_driver_set_store:get:www.totalwine.com/store-finder')
+    logger.info('get:www.totalwine.com/store-finder')
 
     # now change the store we are working with
     driver.get('https://www.totalwine.com/store-finder')
@@ -1257,12 +1637,11 @@ def totalwine_driver_set_store(driver, defaultstore):
     try:
         store_search_box = driver.find_element_by_xpath('//*[@id="storelocator-query"]')
     except Exception as e:
-        print('totalwine_driver_set_store:ERROR:storelocator-query:', str(e))
-        saveBrowserContent( driver, 'totalwine', 'totalwine_driver_set_store' )
-        exitWithError()
+        exceptionPrint( e, 'totalwine_driver_set_store', 'ERROR:storelocator-query', True, totalwine_driver, 'totalwine', 'totalwine_driver_set_store', exitPgm=True )
 
     # dislay a message
-    print('totalwine_driver_set_store:search for default store:', defaultstore)
+    if pmsg: print('totalwine_driver_set_store:search for default store:', defaultstore)
+    logger.info('search for default store:%s', defaultstore)
 
     # now send in the keys
     store_search_box.send_keys(defaultstore)
@@ -1283,7 +1662,8 @@ def totalwine_driver_set_store(driver, defaultstore):
     while not matching_stores and matching_count_down:
         matching_stores = driver.find_elements_by_class_name('shopThisStore')
         if not matching_stores:
-            print('totalwine_driver_set_store:wait to find returned stores 3 secs')
+            if pmsg: print('totalwine_driver_set_store:wait to find returned stores 3 secs')
+            logger.info('wait to find returned stores 3 secs')
             time.sleep(3)
             matching_count_down -= 1
 
@@ -1291,16 +1671,20 @@ def totalwine_driver_set_store(driver, defaultstore):
     select_store=matching_stores[0]
     #
     # select_store = driver.find_element_by_xpath('//*[@id="bottomLeft"]/ul/div/div[1]/li[1]/div/span[6]/button')
-    #print('totalwine_driver_set_store:find and click select this store button:', select_store.get_attribute('name'))
-    print('totalwine_driver_set_store:find and click select this store button:', select_store.get_attribute('aria-label'))
+    #if pmsg: print('totalwine_driver_set_store:find and click select this store button:', select_store.get_attribute('name'))
+    if pmsg: print('totalwine_driver_set_store:find and click select this store button:', select_store.get_attribute('aria-label'))
+    logger.info('find and click select this store button:%s', select_store.get_attribute('aria-label'))
     try:
         select_store.click()
-        print('totalwine_driver_set_store:clicked and selected store button')
+        if pmsg: print('totalwine_driver_set_store:clicked and selected store button')
+        logger.info('clicked and selected store button')
     except Exception:
-        print('totalwine_driver_set_store:store is not clickable - must already be selected')
+        if pmsg: print('totalwine_driver_set_store:store is not clickable - must already be selected')
+        logger.info('store is not clickable - must already be selected')
 
     # sleep for 1 second to allow page refresh
-    print('totalwine_driver_set_store:sleep 1 sec to allow for page refresh')
+    if pmsg: print('totalwine_driver_set_store:sleep 1 sec to allow for page refresh')
+    logger.info('sleep 1 sec to allow for page refresh')
     time.sleep(1)
 
     # now pull the name of the store we are currently configured to work from
@@ -1312,7 +1696,7 @@ def totalwine_driver_set_store(driver, defaultstore):
 
 
 # function used to extract the data from the DOM that was returned
-def wineclub_extract_wine_from_DOM(index,titlelist,pricelist):
+def wineclub_extract_wine_from_DOM(winestore,index,titlelist,pricelist):
     global verbose
 
     
@@ -1329,42 +1713,50 @@ def wineclub_extract_wine_from_DOM(index,titlelist,pricelist):
     wineprice = wineprice.replace('$','').replace(',','')
 
     # return the dictionary
-    return { 'wine_store' : 'WineClub', 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : '' }
+    return { 'wine_store' : winestore, 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : winestore }
 
 
 # Search for the wine
 def wineclub_search( srchstring, wineclub_driver ):
     global verbose
 
+    winestore = 'WineClub'
+
     # Select the search box(es) and find if any are visbile - there can be more than one returned value
     search_box = wineclub_driver.find_elements_by_xpath('//*[@id="search"]')
 
-    print('wineclub_search:len search box:', len(search_box))
+    if pmsg: print('wineclub_search:len search box:', len(search_box))
+    logger.info('search box count:%d', len(search_box))
+
     if len(search_box) > 0:
         search_box = search_box[0]
     else:
         # debugging
         if not 'took too long' in wineclub_driver.page_source:
-            print ('wineclub_driver:Go to theoriginalwineclub.com/wine.html web page')
+            if pmsg: print('wineclub_driver:Go to theoriginalwineclub.com/wine.html web page')
+            logger.info('refresh the page - no search box on first look')
     
             # call routine that finds teh search box and pulls back the search page
-            found_search_box, search_box = get_wineclub_url( driver )
+            found_search_box, search_box = get_wineclub_url( wineclub_driver )
 
             # check to see if we found the search box and if not set to none
             if not found_search_box:
-                print('create_wineclub_selenium_driver:did not find search string - setting driver to none')
-                saveBrowserContent( wineclub_driver, 'wineclub', 'wineclub_search_box_find' )
-                exitWithError('wineclub_search:search_box length was zero')
+                if pmsg: print('create_wineclub_selenium_driver:ERROR:did not find search string - setting driver to none')
+                logger.warning('did not find search string - setting driver to none')
+                saveBrowserContent( wineclub_driver, 'wineclub', 'wineclub_search:box_find' )
+                return None
     
     # first check to see that the search box is displayed - if not visible then click the bottom that makes it visible
     if not search_box.is_displayed():
         # debugging
-        print ('wineclub_search:search box is not displayed - we want to click the button that displays it')
+        if pmsg: print('wineclub_search:search box is not displayed - we want to click the button that displays it')
+        logger.info('search box is not displayed - we want to click the button that displays it')
         # make the search box visible if it is not
         wineclub_driver.find_element_by_xpath('//*[@id="header-search-mobile"]/span').click()
 
     # debugging
-    print ('wineclub_search:search for:', srchstring)
+    if pmsg: print('wineclub_search:search for:', srchstring)
+    logger.info('search for:%s', srchstring)
 
     # send in the string to this box and press RETURN
     search_box.clear()
@@ -1380,22 +1772,25 @@ def wineclub_search( srchstring, wineclub_driver ):
 
     # message we have a problem
     if len(titlelist) != len(pricelist):
-        print('wineclub_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        if pmsg: print('wineclub_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        logger.warning('price and name lists different length:%s:len(wine):%d:len(price):%d',srchstring,len(titlelist),len(pricelist))
 
-    # debugging
-    if verbose > 5:
-        print ('wineclub_search:pricelist:', pricelist)
 
-    # debugging
-    print('wineclub_search:', srchstring, ':returned records:',  len(pricelist))
-    
     # now loop through the wines we found
     for index in range(len(pricelist)):
-        found_wines.append( wineclub_extract_wine_from_DOM(index,titlelist,pricelist) )
+        try:
+            found_wines.append( wineclub_extract_wine_from_DOM(winestore,index,titlelist,pricelist) )
+        except Exception as e:
+            exceptionPrint( e, 'wineclub_extract_wine_from_DOM', 'ERROR:page is stale:'+srchstring, True, wineclub_driver, 'wineclub', 'wineclub_search')
+            return []
 
     # debugging
-    if verbose > 5:
-        print ('wineclub_search:found_wines:', found_wines)
+    if pmsg: print('wineclub_search:', srchstring, ':returned records:', len(found_wines))
+    logger.info(rtnrecfmt, srchstring,  len(found_wines))
+
+    # send back - no wine found if we did not find a wine
+    if not found_wines:
+        found_wines = returnNoWineFound( winestore )
 
     # return the wines we found
     return found_wines
@@ -1417,11 +1812,14 @@ def get_wineclub_url( driver ):
             cnt = 0
         except  Exception as e:
             # did not find the search box
-            print('wineclub_driver:waiting on search box (wait 1 second):', cnt)
-            print('error:', str(e))
+            if pmsg: print('wineclub_driver:waiting on search box (wait 1 second):', cnt)
+            if pmsg: print('error:', str(e))
+            logger.info('waiting on search box (wait 1 second):%d', cnt)
+            if pmsg: print('error:%s', str(e))
             if 'took too long' in driver.page_source:
                 # did not find a valid page
-                print('wineclub_driver:page did not load - took too long - try again')
+                if pmsg: print('wineclub_driver:page did not load - took too long - try again')
+                logger.warning('page did not load - took too long - try again')
                 driver.get('https://theoriginalwineclub.com/wine.html')
             time.sleep(1)
             cnt -= 1
@@ -1432,7 +1830,8 @@ def get_wineclub_url( driver ):
                 cnt = 0
             else:
                 # did not find a valid page
-                print('wineclub_driver:page did not load - took too long - try again')
+                if pmsg: print('wineclub_driver:page did not load - took too long - try again')
+                logger.warning('page did not load - took too long - try again')
                 driver.get('https://theoriginalwineclub.com/wine.html')
                 cnt -= 1
 
@@ -1443,30 +1842,27 @@ def get_wineclub_url( driver ):
 def create_wineclub_selenium_driver(defaultzip):
     global verbose
 
-    # debugging
-    if verbose > 0:
-        print('wineclub_driver:start:---------------------------------------------------')
-        print ("wineclub:Start up webdriver.Chrome")
-    
     # Using Chrome to access web
-#    driver = webdriver.Chrome()
-    driver=create_chrome_webdriver_w3c_off()
+    driver=create_webdriver_from_global_var('wineclub_driver')
 
 
     # debugging
-    print ('wineclub_driver:Go to theoriginalwineclub.com/wine.html web page')
+    if pmsg: print('wineclub_driver:Go to theoriginalwineclub.com/wine.html web page')
+    logger.info('Go to theoriginalwineclub.com/wine.html web page')
     
     # call routine that finds teh search box and pulls back the search page
     found_search_box, search_box = get_wineclub_url( driver )
 
     # check to see if we found the search box and if not set to none
     if not found_search_box:
-        print('create_wineclub_selenium_driver:did not find search string - setting driver to none')
+        if pmsg: print('create_wineclub_selenium_driver:ERROR:did not find search string - setting driver to none')
+        logger.warning('did not find search string - setting driver to none')
         saveBrowserContent( driver, 'wineclub', 'create_wineclub_selenium_driver' )
         driver=None
 
     # debugging
-    print('wineclub_driver:complete:---------------------------------------------------')
+    if pmsg: print('wineclub_driver:complete:---------------------------------------------------')
+    logger.info('complete:---------------------------------------------------')
     
 
     # return the driver
@@ -1477,99 +1873,71 @@ def create_wineclub_selenium_driver(defaultzip):
 
 #### HITIME ####
 
-# check to see if we want to keep this price element
-def hitimes_price_elem_include( msg, price ):
-    global verbose
-
-    
-    # do regex and skip old price entries
-    if re.search('old-price', price.get_attribute('id')):
-        # debugging
-        if verbose > 4:
-            print('hitime_search:old-price-throw away')
-        return False
-    elif re.search('\-related', price.get_attribute('id')):
-        # debugging
-        if verbose > 4:
-            print('hitime_search:-related-throw away')
-        return False
-    else:
-        # debugging
-        if verbose > 4:
-            print('hitime_search:keep-this-price:',  price.get_attribute('id'))
-        return True
-
-
 # function used to extract the data from the DOM that was returned
 # pulling back the price record with the lowest price
-def hitime_extract_wine_from_DOM(index,titlelist,pricelist):
+def hitime_extract_wine_from_DOM(winestore,index,titlelist,pricelist):
     global verbose
 
     
     # extract the values for title
-    winename = titlelist[index].text
+    winename = titlelist[index].text.upper()
 
     # now find the lowest of prices
     winepricemin=100000.00
     for winepricerec in pricelist:
-        #print('winepricemin:', winepricemin, ':winepricerec:', winepricerec.text)
+        #if pmsg: print('winepricemin:', winepricemin, ':winepricerec:', winepricerec.text)
         winepriceflt = float(winepricerec.text.replace('$','').replace(',',''))
         if winepricemin > winepriceflt:
             winepricemin = winepriceflt
-            # print('min set to:', winepricemin)
+            # if pmsg: print('min set to:', winepricemin)
 
     # found the low price convert to string
     wineprice = str(winepricemin)
    
-    # old logic commented out
-    if False:
-        # regex the price field to match our expections
-        match = re.search('\$(.*)$',wineprice)
-        if match:
-            wineprice = match.group(1)
-
-        # now clean up $ and ,
-        wineprice = wineprice.replace('$','').replace(',','')
-        
     # return the dictionary
-    return { 'wine_store' : 'HiTimes', 'wine_name' : winename, 'wine_price' : wineprice,  'wine_year' : '', 'label' : '' }
+    return { 'wine_store' : winestore, 'wine_name' : winename, 'wine_price' : wineprice,  'wine_year' : '', 'label' : winestore }
 
 
 # Search for the wine
 def hitime_search( srchstring, hitime_driver ):
     global verbose
 
-    # Select the search box(es) and find if any are visbile - there can be more than one returned value
-    try:
-        search_box = hitime_driver.find_element_by_xpath('//*[@id="search"]')
-    except  Exception as e:
-        print ('hitime_search://*[@id="search"]:no found:error:', str(e))
-        print ('hitime_search:type:', type(e))
-        print ('hitime_search:args:', e.args)
-        saveBrowserContent( hitime_driver, 'hitime', 'hitime_driver' )
+    winestore = 'HiTimes'
+
+    # if the srchstring is too short - don't do any work
+    if len(srchstring) < 3:
+        if pmsg: print('hitime_search:srchstring: {} :must be 3 char or greater-length: {} :returned records: None:'.format(srchstring, len(srchstring)))
+        logger.info('srchstring: {} :must be 3 char or greater-length: {} :returned records: None:'.format(srchstring, len(srchstring)))
+        return []
+              
+    search_boxes = find_elements_looped( hitime_driver, '//*[@id="search"]', 'by_xpath', 'hitime_search', 'hitime_driver_missing_search_box' )
+    if not search_boxes:
+        saveBrowserContent( hitime_driver, 'hitime', 'hitime_driver:missing_search_box' )
         # now get the page again - see if this fixes it
-        print ('hitime_search:get the URL again')
+        if pmsg: print('hitime_search:get the URL again')
+        logger.info('get the URL again')
         hitime_driver.get('https://hitimewine.net')
-        time.sleep(3)
-        # do it again
-        try:
-            print ('hitime_search:find the search field - 2nd attempt')
-            search_box = hitime_driver.find_element_by_xpath('//*[@id="search"]')
-        except  Exception as e:
-            print ('hitime_search://*[@id="search"]:no found:error:', str(e))
-            print ('hitime_search:type:', type(e))
-            print ('hitime_search:args:', e.args)
-            print ('hitime_search:exiting program due to error')
-            saveBrowserContent( hitime_driver, 'hitime', 'hitime_driver' )
-            exitWithError()
+        search_box = find_elements_looped( hitime_driver, 'by_xpath', '//*[@id="search"]' )
+        
+    # failed to find the search box
+    if not search_boxes:
+        if pmsg: print('hitime_search:exiting program due to ERROR')
+        logger.error('exiting program due to no search box being found')
+        saveBrowserContent( hitime_driver, 'hitime', 'hitime_search' )
+        exitWithError()
  
-    # first check to see that the search box is displayed - if not visible then click the bottom that makes it visible
-    if not search_box.is_displayed():
-        # debugging
-        print ('hitime_search:search box is not displayed')
+
+    # get the first displayed search_box
+    for search_box in search_boxes:
+        if search_box.is_displayed():
+            # debugging
+            if pmsg: print('hitime_search:search box is displayed:', search_box.is_displayed() )
+            logger.info('search box is displayed:%s', search_box.is_displayed() )
+            break
 
     # debugging
-    print ('hitime_search:search for:', srchstring)
+    if pmsg: print('hitime_search:search for:', srchstring)
+    logger.info('search for:%s', srchstring)
 
     # send in the string to this box and press RETURN
     search_box.clear()
@@ -1579,124 +1947,232 @@ def hitime_search( srchstring, hitime_driver ):
     # create the array that we will add to
     found_wines = []
 
-    # check to see how many results we got back
-    try:
-        returned_results = hitime_driver.find_elements_by_class_name('empty-catalog')
-        if (len(returned_results) > 0):
-            print('hitime_search:found-empty-catalog-text:', returned_results[0].text)
-            # debugging
-            print ('hitime_search:', srchstring, ':no results returned - refresh the page we are looking at')
-            # update the website we are pointing at
-            hitime_driver.get('https://hitimewine.net')
-            # return no results
-            return []
-        else:
-            # debugging
-            if verbose > 1:
-                print('hitime_search:found-empty-catalog-results:len:', len(returned_results))
+    # loop until we get a response or until we run out of loop count
+    results = find_elements_looped( hitime_driver, 'breadcrumbs', 'by_class_name', 'hitime_search', 'waiting for search response' )
+    if not results:
+        if pmsg: print('hitime_search:ERROR:no response - we exceed our loop count:', srchstring)
+        logger.warning('no response - we exceed our loop count:%s', srchstring)
+        saveBrowserContent( hitime_driver, 'hitime', 'hitime_search:not_results' )
+        # update the website we are pointing at
+        hitime_driver.get('https://hitimewine.net')
+        # return no results
+        return returnNoWineFound( winestore )
 
-    except NoSuchElementException:
-        print ('hitime_search:empty-catalog:object not found')
+    # check to see that we got a search results page
+    # and that our search string is in it
+    results = find_elements_looped( hitime_driver, 'page-title-wrapper', 'by_class_name', 'hitime_search', 'waiting for search result string' )
+    loopcnt = 4
+    try:
+        while results and srchstring.upper() not in results[0].text and loopcnt:
+            if pmsg: print('htimes_search: srchstring not in srch result string:', loopcnt)
+            logger.info('srchstring not in srch result string:%d', loopcnt)
+            loopcnt -= 1
+            time.sleep(2)
+            results = find_elements_looped( hitime_driver, 'page-title-wrapper', 'by_class_name', 'hitime_search', 'waiting for search result string' )
+    except:
+        results = find_elements_looped( hitime_driver, 'page-title-wrapper', 'by_class_name', 'hitime_search', 'waiting for search result string' )
+
+    # if pmsg: print out what we found
+    for pagetitle in results:
+        if pmsg: print('hitime_search:pagetitle:', pagetitle.text)
+        logger.info('pagetitle:%s', pagetitle.text)
+
+
+    # we got the page back - now pull out all the data we need from this page
+    noresults1 = hitime_driver.find_elements_by_class_name('empty-catalog')
+    noresults2 = hitime_driver.find_elements_by_class_name('notice')
+    results = hitime_driver.find_elements_by_class_name('toolbar-number')
+    entitylist = hitime_driver.find_elements_by_class_name('product-item-info') # list of returned items
+    entitylist2 = hitime_driver.find_elements_by_class_name('product-info-main')  # single returned item
         
-    # get results back and look for the thing we are looking for - the list of things we are going to process
-    entitylist = hitime_driver.find_elements_by_xpath('//*[@id="category-products-grid"]/ol/li')
+    if noresults1:
+        if pmsg: print('hitime_search:empty-catalog-text:', noresults1[0].text)
+        logger.info('empty-catalog-text:%s', noresults1[0].text)
+        # debugging
+        if pmsg: print('hitime_search:', srchstring, ':noresults1 - refresh the page we are looking at - returned records:  None')
+        logger.info ('%s:returned records:NoWineFound - due to nosresults1', srchstring)
+        # update the website we are pointing at
+        hitime_driver.get('https://hitimewine.net')
+        # return no results
+        return  returnNoWineFound( winestore )
+
+    if noresults2:
+        if pmsg: print('hitime_search:message:', noresults2[0].text)
+        logger.info('noresults2-message:%s',noresults2[0].text)
+        # debugging
+        if pmsg: print('hitime_search:', srchstring, ':noresults2 - refresh the page we are looking at - returned records:  None')
+        logger.info ('%s:returned records:NoWineFound - due to nosresults2', srchstring)
+        # update the website we are pointing at
+        hitime_driver.get('https://hitimewine.net')
+        # return no results
+        return  returnNoWineFound( winestore )
+    
+    if results:
+        resultcnt = int(results[0].text)
+        if pmsg: print('hitime_search:resultcnt:', resultcnt)
+        if pmsg: print('hitime_search:results[0].text:', results[0].text)
+        logger.info('resultcnt:%d', resultcnt)
+        logger.info('results[0].text:%s', results[0].text)
+    else:
+        resultcnt = 24
 
     # debugging
-    if verbose > 5:
-        print('entitylist:', entitylist)
+    if pmsg: print('hitime_search:lengthof:noresults1:{},noresults2:{},results:{},entitylist:{},entitylist2:{},resultcnt:{}'.format(len(noresults1),len(noresults2), len(results), len(entitylist), len(entitylist2), resultcnt))
+    logger.info('lengthof:noresults1:{},noresults2:{},results:{},entitylist:{},entitylist2:{},resultcnt:{}'.format(len(noresults1),len(noresults2), len(results), len(entitylist), len(entitylist2), resultcnt))
 
+    # change what we are looping on
+    if entitylist2 and not entitylist:
+        if pmsg: print('hitime_search:single wine found - swapping entitylist2 into entitylist')
+        logger.info('single wine found - swapping entitylist2 into entitylist')
+        entitylist = entitylist2
+        
     # step through this list
+    entitycount = 0
     for entity in entitylist:
+        entitycount += 1
+        if entitycount > resultcnt:
+            if pmsg: print('hitime_search:entitycount:{} > resultcnt:{} - skipping'.format(entitycount,resultcnt))
+            logger.info('entitycount:{} > resultcnt:{} - skipping'.format(entitycount,resultcnt))
+            break
+
+        # check entitycount to maxresults per page
+        if entitycount > 25:
+            if pmsg: print('hitime_search:entitycount:{} > max-items-per-page:{} - skipping'.format(entitycount,25))
+            logger.info('entitycount:{} > max-items-per-page:{} - skipping'.format(entitycount,25))
+            break
+
         # extract out for this entry these - we use elements so we don't need to try/catch
-        titlelist = entity.find_elements_by_class_name('product-name')
-        pricelistraw = entity.find_elements_by_class_name('price')
-        pricelistreg = entity.find_elements_by_class_name('regular-price')
-        pricelistwrapper = entity.find_elements_by_class_name('price-wrapper')
+        try:
+            if entitylist2 == entitylist:
+                titlelist = entity.find_elements_by_class_name('page-title')
+            else:
+                titlelist = entity.find_elements_by_class_name('product-name')
+            pricelistraw = entity.find_elements_by_class_name('price')
+            pricelistreg = entity.find_elements_by_class_name('regular-price')
+            pricelistspecial = entity.find_elements_by_class_name('special-price')
+            pricelistwrapper = entity.find_elements_by_class_name('price-wrapper')
+            if pricelistspecial:
+                pricelistwrapper = pricelistspecial[0].find_elements_by_class_name('price')
+        except Exception as e:
+            if pmsg: print('hitime_search:entitycount:', entitycount)
+            logger.info('entitycount:%d', entitycount)
+            exceptionPrint( e, 'hitime_search', 'ERROR:extracting title and price lists:'+srchstring, True, hitime_driver, 'hitime', 'hitime_search' )
+            if pmsg: print('hitime_search: {} : returned records:'.format(srchstring), len(found_wines))
+            logger.info(rtnrecfmt, srchstring, len(found_wines))
+            # capture and process errors if we get them
+            try:
+                resultidx = 0
+                for result in results:
+                    if pmsg: print('hitime_search:result[{}].text:{}'.format(resultidx, result.text))
+                    logger.info('resultidx:%s:result.text:%s',resultidx, result.text)
+                    resultidx += 1
+            except Exception as e:
+                exceptionPrint( e, 'hitime_search', 'ERROR:post error processing error:'+srchstring, True, hitime_driver, 'hitime', 'hitime_search' )
+
+            return found_wines
+            
 
         # debugging
-        if verbose > 5:
-            print('pricelistraw:', pricelistraw)
-            print('pricelistreg:', pricelistreg)
-            print('pricelistwrapper:', pricelistwrapper)
+        logger.debug('dump out the various things we just extracted')
+        logger.debug('pricelistraw:len:%d', len(pricelistraw))
+        logger.debug('pricelistreg:len:%d', len(pricelistreg))
+        logger.debug('pricelistwrapper:len:%d', len(pricelistwrapper))
+        logger.debug('-'*40)
 
         # pull out the entry of interest
-        if len(pricelistwrapper):
-            found_wines.append( hitime_extract_wine_from_DOM(0,titlelist,pricelistwrapper) )
-        elif len(pricelistraw):
-            found_wines.append( hitime_extract_wine_from_DOM(0,titlelist,pricelistraw) )
-        else:
-            found_wines.append( hitime_extract_wine_from_DOM(0,titlelist,pricelistreg) )
+        try:
+            if len(pricelistwrapper):
+                found_wines.append( hitime_extract_wine_from_DOM(winestore,0,titlelist,pricelistwrapper) )
+            elif len(pricelistraw):
+                found_wines.append( hitime_extract_wine_from_DOM(winestore,0,titlelist,pricelistraw) )
+            else:
+                found_wines.append( hitime_extract_wine_from_DOM(winestore,0,titlelist,pricelistreg) )
+
+        except Exception as e:
+            if pmsg: print('hitime_search:exception encounterd on entitycount:', entitycount)
+            logger.info('exception encounterd on entitycount:%d', entitycount)
+            exceptionPrint( e, 'hitime_extract_wine_from_DOM', 'ERROR:page is stale:'+srchstring, True, hitime_driver, 'hitime', 'hitime_search_extract_from_DOM' )
+            if pmsg: print('hitime_search: {} : returned records:'.format(srchstring), len(found_wines))
+            logger.info(rtnrecfmt, srchstring, len(found_wines))
+            return found_wines
 
 
     # debugging
-    print ('hitime_search:found_wines:', len(found_wines))
+    if pmsg: print('hitime_search: {} : returned records:'.format(srchstring), len(found_wines))
+    logger.info(rtnrecfmt, srchstring, len(found_wines))
+
+    # if we did not get back records return that
+    if not found_wines:
+        return returnNoWineFound( winestore )
 
     # return the wines we found
     return found_wines
+
+def hitime_starting_dialogue_click_closed( driver ):
+    # check for the button and click it
+    try:
+        # find the element
+        close_link = driver.find_element_by_xpath('//*[@id="contentInformation"]/div[2]/div[2]/a')
+        loopcnt = 11
+        while not close_link.is_displayed() and loopcnt:
+            # increment the counter
+            loopcnt -= 1
+            # debugging
+            if pmsg: print('hitime_driver:wait for the object to be displayed:', loopcnt)
+            logger.info('wait for the object to be displayed:%d', loopcnt)
+            # sleep
+            time.sleep(2)
+
+        # now we waited long enough - what do we do now?
+        if close_link.is_displayed():
+            # debugging
+            if pmsg: print('hitime_driver:close_link.click')
+            logger.info('close_link.click')
+            # click the link
+            close_link.click()
+        else:
+            # debugging - never ended up being displayed - so message this
+            if pmsg: print('hitime_driver:close_link found but not displayed')
+            logger.info('close_link found but not displayed')
+    except NoSuchElementException:
+        if pmsg: print('hitime_driver:close_link does not exist')
+        logger.info('close_link does not exist')
+
 
 # function to create a selenium driver for hitime and get past the close link
 def create_hitime_selenium_driver(defaultzip):
     global verbose
 
-    # debugging
-    if verbose > 0:
-        print('hitime_driver:start:---------------------------------------------------')
-        print('hitime_driver:Start up webdriver.Chrome')
-    
     # Using Chrome to access web
-#    driver = webdriver.Chrome()
-    driver=create_chrome_webdriver_w3c_off()
+    driver=create_webdriver_from_global_var('hitime_driver')
 
     # debugging
-    print ('hitime_driver:Go to hitimewine.net web page')
+    if pmsg: print('hitime_driver:Go to hitimewine.net web page')
+    logger.info('Go to hitimewine.net web page')
     
     # Open the website
     driver.get('https://hitimewine.net')
 
-    # sleep to allow the dialogue to come up
-    print ('hitime_driver:sleep 1 to allow popup to appear')
-    time.sleep(1)
+    # look for the search box
+    results = find_elements_looped( driver, 'q', 'by_name', 'hitime_driver', 'waiting for search page to render')
+    if not results:
+        if pmsg: print('hitime_driver:ERROR:never found search page - return None:', srchstring)
+        logger.warning('never found search page - return None:%s', srchstring)
+        return None
 
-    # check for the button and click it
-    try:
-        # find the element
-        close_link = driver.find_element_by_xpath('//*[@id="contentInformation"]/div[2]/div[2]/a')
-        # set the loop counter
-        loopcnt = 0
-        while not close_link.is_displayed() and loopcnt < 11:
-            # increment the counter
-            loopcnt += 1
-            # debugging
-            print('hitime_driver:wait 1 second for the object to be displayed-loopcnt:', loopcnt)
-            # sleep
-            time.sleep(1)
-
-        # now we waited long enough - what do we do now?
-        if close_link.is_displayed():
-            # debugging
-            print('hitime_driver:close_link.click')
-            # click the link
-            close_link.click()
-        else:
-            # debugging - never ended up being displayed - so message this
-            print('hitime_driver:close_link found but not displayed')
-    except NoSuchElementException:
-        print ('hitime_driver:close_link does not exist')
-
+    # if dialogue shows up - click it closed
+    hitime_starting_dialogue_click_closed( driver )
+    
     # make sure we have a search box in the page that we obtained
     try:
         search_box = driver.find_element_by_xpath('//*[@id="search"]')
     except  Exception as e:
-        print ('hitime_driver://*[@id="search"]:no found:error:', str(e))
-        print ('hitime_driver:type:', type(e))
-        print ('hitime_driver:args:', e.args)
-        print ('hitime_driver:exiting program due to error')
-        saveBrowserContent( hitime_driver, 'hitime', 'hitime_driver' )
-        exitWithError()
+        exceptionPrint( e, 'hitime_driver', 'ERROR:did not find search_box using xpath://*[@id="search"]:'+srchstring, True, driver, 'hitime', 'hitime_driver', exitPgm=True )
 
 
     # debugging
-    print('hitime_driver:complete:---------------------------------------------------')
+    if pmsg: print('hitime_driver:complete:---------------------------------------------------')
+    logger.info('complete:---------------------------------------------------')
     
 
     # return the driver
@@ -1709,7 +2185,7 @@ def create_hitime_selenium_driver(defaultzip):
 
 
 # function used to extract the data from the DOM that was returned
-def wally_extract_wine_from_DOM(index,titlelist,pricelist):
+def wally_extract_wine_from_DOM(winestore,index,titlelist,pricelist):
     global verbose
 
     
@@ -1726,29 +2202,104 @@ def wally_extract_wine_from_DOM(index,titlelist,pricelist):
     wineprice = wineprice.replace('$','').replace(',','')
 
     # return the dictionary
-    return { 'wine_store' : 'Wally-LA', 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : '' }
+    return { 'wine_store' : winestore, 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : winestore }
 
 
 # Search for the wine
 def wally_search( srchstring, wally_driver ):
     global verbose
 
+    winestore = 'Wally-LA'
+    
     # Select the search box(es) and find if any are visbile - there can be more than one returned value
     search_box = wally_driver.find_element_by_xpath('//*[@id="search"]')
     
     # first check to see that the search box is displayed - if not visible then click the bottom that makes it visible
     if not search_box.is_displayed():
         # debugging
-        print ('wally_search:search box is not displayed')
+        if pmsg: print('wally_search:search box is not displayed')
+        logger.info('wally_search:search box is not displayed')
 
     # debugging
-    print ('wally_search:search for:', srchstring)
+    if pmsg: print('wally_search:search for:', srchstring)
+    logger.info('search for:%s', srchstring)
 
     # send in the string to this box and press RETURN
     search_box.clear()
     search_box.send_keys(srchstring)
     search_box.send_keys(Keys.RETURN)
     
+    # pause for page to catch up
+    time.sleep(1)
+
+    # create the array that we will add to
+    found_wines = []
+
+    # grab the results - or - just put enough pause in here to let everything catch up
+    results = find_elements_looped( wally_driver, 'breadcrumbs', 'by_class_name', 'wally_search', 'wait for first search response' )
+    if not results:
+        if pmsg: print('wally_search:ERROR:search results never returned a result:', srchstring)
+        logger.warning('search results never returned a result:%s', srchstring)
+        return returnNoWineFound( winestore )
+
+    # grab the results - or - just put enough pause in here to let everything catch up
+    results = find_elements_looped( wally_driver, 'category-products', 'by_class_name', 'wally_search', 'wait for search content' )
+    if not results:
+        if pmsg: print('wally_search:ERROR:search results never returned a result:', srchstring)
+        logger.warning('search results never returned a result:%s', srchstring)
+        return returnNoWineFound( winestore )
+
+    # odd - but the javascript in the page drives the population of content - so we have to wait for this to happen
+    loopcnt = 6
+    resulttext = ''
+    while not resulttext and loopcnt:
+        try:
+            resulttext = results[0].text
+        except Exception as e:
+            exceptionPrint( e, 'wally_search', 'ERROR:failed to get result.text for search on:'+srchstring, True, wally_driver, 'wally', 'wally_search' )
+            if pmsg: print('wally_search:find_elements_looped again')
+            logger.info('find_elements_looped again')
+            results = find_elements_looped( wally_driver, 'category-products', 'by_class_name', 'wally_search', 'look for content again' )
+            
+        time.sleep(1)
+        if pmsg: print('wally_search:waiting for result text to show up:result.text:', loopcnt)
+        logger.info('waiting for result text to show up:loopcnt:%d', loopcnt)
+        loopcnt -= 1
+    
+    
+    # get the specifics we want
+    results = wally_driver.find_elements_by_class_name('count-container')
+    noresults = wally_driver.find_elements_by_class_name('searchspring-no_results')
+
+
+    # if we get no results - we are done and return nothing
+    if noresults:
+        if pmsg: print('wally_search:no results returned for this wine')
+        logger.info('no results returned for this wine:%s', srchstring)
+        return returnNoWineFound( winestore )
+
+    # check that we got results
+    if not results:
+        if pmsg: print('wally_search:ERROR:lack of response that is parsable - return no wines:', srchstring)
+        logger.warning('lack of response that is parsable - return no wines:%s', srchstring)
+        # saveBrowserContent( wally_driver, 'wally', 'wally_search')
+        return returnNoWineFound( winestore )
+        
+    # we got results - figure out how many
+    for result in results:
+        try:
+            if 'result' in result.text:
+                winesfound = result.text.split()[1]
+                if pmsg: print('wally_search:found wines:', winesfound)
+                logger.info('found wines:%s', winesfound)
+                break
+            else:
+                if pmsg: print('wally_search:unusable_result_text:', result.text)
+                logger.info('unusable_result_text:%s', result.text)
+        except Exception as e:
+            exceptionPrint( e, 'wally_search', 'ERROR:failed to get result.text for search on:'+srchstring, True, wally_driver, 'wally', 'wally_search' )
+            return []
+
     # create the array that we will add to
     found_wines = []
 
@@ -1757,32 +2308,36 @@ def wally_search( srchstring, wally_driver ):
     pricelist = wally_driver.find_elements_by_class_name('price-box')
 
     # debugging
-    print('wally_search:', srchstring, ':returned records:',  len(pricelist))
+    if pmsg: print('wally_search:pricelist records:',  len(pricelist))
+    logger.info('pricelist records:%d',  len(pricelist))
     
-    # debugging
-    if verbose > 5:
-        print ('wally_search:pricelist:', pricelist)
 
     # message we have a problem
     if len(titlelist) != len(pricelist):
-        print('wally_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        if pmsg: print('wally_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        logger.info('price and name lists different length:%s:len(wine):%d:len(price):%d',srchstring,len(titlelist),len(pricelist))
         # check to see if we don't have enough titles for prices
         if len(titlelist) < len(pricelist):
-            print('wally_search:len-titlelist:',len(titlelist))
-            print('wally_search:len-pricelist:',len(pricelist))
-            print('wally_search:exitting program due to error:titles are less than prices')
-            print('wally_search:actually we just return an empty list and SKIP this wine')
+            if pmsg: print('wally_search:len-titlelist:',len(titlelist))
+            if pmsg: print('wally_search:len-pricelist:',len(pricelist))
+            if pmsg: print('wally_search:exitting program due to ERROR:titles are less than prices:', srchstring)
+            if pmsg: print('wally_search:actually we just return an empty list and SKIP this wine')
+            logger.info('len-titlelist:%d',len(titlelist))
+            logger.info('len-pricelist:%d',len(pricelist))
+            logger.info('exitting program due to ERROR:titles are less than prices:%s', srchstring)
+            logger.info('actually we just return an empty list and SKIP this wine')
             saveBrowserContent( wally_driver, 'wally', 'wally_search')
             return found_wines
-            #exitWithError()
 
     # now loop through the wines we found
     for index in range(len(pricelist)):
-        found_wines.append( wally_extract_wine_from_DOM(index,titlelist,pricelist) )
+        found_wines.append( wally_extract_wine_from_DOM(winestore,index,titlelist,pricelist) )
 
     # debugging
-    if verbose > 5:
-        print ('wally_search:found_wines:', found_wines)
+    logger.info(rtnrecfmt, srchstring, len(found_wines))
+
+    if not found_wines:
+        return returnNoWineFound( winestore )
 
     # return the wines we found
     return found_wines
@@ -1791,29 +2346,33 @@ def wally_search( srchstring, wally_driver ):
 def create_wally_selenium_driver(defaultzip):
     global verbose
 
-    # debugging
-    if verbose > 0:
-        print('wally_driver:start:---------------------------------------------------')
-        print ('wally_driver:Start up webdriver.Chrome')
-    
     # Using Chrome to access web
-#    driver = webdriver.Chrome()
-    driver=create_chrome_webdriver_w3c_off()
+    driver=create_webdriver_from_global_var('wally_driver')
 
     # debugging
-    print ('wally_driver:Go to www.wallywine.com web page')
+    if pmsg: print('wally_driver:Go to www.wallywine.com web page')
+    logger.info('Go to www.wallywine.com web page')
     
     # Open the website
     try:
         driver.get('https://www.wallywine.com')
         search_box = driver.find_element_by_xpath('//*[@id="search"]')
     except Exception as e:
-        print('wally_driver:error:', str(e))
-        print('wally_driver:failed:REMOVING this store from this run')
+        exceptionPrint( e, 'wally_driver', 'ERROR:unable to get to the web site', True, driver, 'wally', 'wally_driver' )
+        if pmsg: print('wally_driver:failed:REMOVING this store from this run')
+        logger.warning('REMOVING this store from this run')
         driver = None
 
+    # check to see if the dialogue is up and close it if it is
+    close_btn = driver.find_elements_by_class_name('NostoCloseButton')
+    if close_btn and close_btn[0].is_displayed():
+        if pmsg: print('wally_driver:closing intro dialogue box')
+        logger.info('wally_driver:closing intro dialogue box')
+        close_btn[0].click()
+
     # debugging
-    print('wally_driver:complete:---------------------------------------------------')
+    if pmsg: print('wally_driver:complete:---------------------------------------------------')
+    logger.info('complete:---------------------------------------------------')
     
 
     # return the driver
@@ -1824,7 +2383,7 @@ def create_wally_selenium_driver(defaultzip):
 
 
 # function used to extract the data from the DOM that was returned
-def pavillions_extract_wine_from_DOM(index,titlelist,pricelist):
+def pavillions_extract_wine_from_DOM(winestore,index,titlelist,pricelist):
     global verbose
 
     
@@ -1832,7 +2391,7 @@ def pavillions_extract_wine_from_DOM(index,titlelist,pricelist):
     winename = titlelist[index].text
     wineprice = pricelist[index].text
 
-    # print('pavillions_extract_wine_from_DOM:wineprice:',wineprice)
+    # if pmsg: print('pavillions_extract_wine_from_DOM:wineprice:',wineprice)
 
     # regex the price field to match our expections
     match = re.search('\$(.*)$',wineprice)
@@ -1842,8 +2401,17 @@ def pavillions_extract_wine_from_DOM(index,titlelist,pricelist):
     # now clean up $ and ,
     wineprice = wineprice.replace('$','').replace(',','')
 
+    # if the price is zero - return non
+    if not wineprice:
+        if pmsg: print('pavillions_extract_wine_from_DOM: no wine price - return None:', pricelist[index].text, ':', winename)
+        logger.warning('no wine price - return None:%s:%s', pricelist[index].text, winename)
+        return None
+
+    # apply the 10% discount for buying 6 or more - but kill any rounding
+    wineprice = str( int(float(wineprice)*100*0.9)/100 )
+
     # return the dictionary
-    return { 'wine_store' : 'Vons', 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : '' }
+    return { 'wine_store' : winestore, 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : winestore }
 
 
 # Search for the wine
@@ -1852,40 +2420,39 @@ def pavillions_search( srchstring, pavillions_driver ):
     global test
     global pavillions_search_xpath
 
+    winestore = 'Vons'
+
     # debugging
-    print ('pavillions_search:go to search page:shop.pavilions.com/home.html')
+    if pmsg: print('pavillions_search:go to search page:https://shop.pavilions.com/home.html')
+    logger.info('go to search page:https://shop.pavilions.com/home.html')
 
     # force entry on to the search page first
-    pavillions_driver.get('https://shop.pavilions.com/home.html')
+    if not get_url_looped( pavillions_driver, 'https://www.pavilions.com/shop', 'pavillions_search' ):
+        if pmsg: print('pavillions_search:ERROR:never got page for this search - return nothing')
+        logger.warning('never got page for this search - return nothing')
+        return []
+
 
     # debugging
-    print ('pavillions_search:find the search_box')
+    if pmsg: print('pavillions_search:find the search_box')
+    logger.info('pavillions_search:find the search_box')
 
     # find the search box (change the xpath to the search window)
     search_box = pavillions_find_search_box(pavillions_driver)
     
-    # debugging
-    if verbose > 5:
-        # find all the matches - get all - not just first
-        search_boxs = pavillions_driver.find_elements_by_xpath('//*[@id="search-img"]')
-        print('number of search_boxs:', len(search_boxs))
-        for element in search_boxs:
-            print_html_elem('pavillions_search:element:', 0, element)
-            print('=================================')
-
     # check to see the search box is visible - if not we have a problem
     if not search_box.is_displayed():
         # debugging
-        print ('pavillions_search:search box 2 is not displayed - this is a problem - exit')
-        print_html_elem('pavillions_search:search_box2:', 0, search_box)
+        logger.warning('search box 2 is not displayed - this is a problem - exit')
         # close the browser because we are going to quit
-        print('pavilliions_search:exitting program due to error:missing search box')
+        if pmsg: print('pavilliions_search:exitting program due to ERROR:missing search box')
         saveBrowserContent( pavillions_driver, 'pav', 'pavillions_search' )
         pavillions_driver.quit()
         exitWithError()
 
     # debugging
-    print ('pavillions_search:search for:', srchstring, ' in wines:search_box:', search_box.get_attribute('name'))
+    if pmsg: print('pavillions_search:search for:', srchstring, ' in wines:search_box:', search_box.get_attribute('name'))
+    logger.info('search for:%s:in wines search_box:%s', srchstring, search_box.get_attribute('name'))
 
     # send in the string to this box and press RETURN
     search_box.clear()
@@ -1896,72 +2463,28 @@ def pavillions_search( srchstring, pavillions_driver ):
     found_wines = []
 
     # it may take time to get this to show up - so lets build a small loop here
-    for tries in range(4):
-        try:
-            returned_result = pavillions_driver.find_element_by_xpath('//*[@id="search-summary_0"]/div/div/h1')
-            break
-        except Exception as e:
-            print('pavillions_search:did not find [search-summary_0] waiting 1 second try number:', tries)
-            time.sleep(1)
-    
+    returned_result = find_elements_looped( pavillions_driver, 'search--title', 'by_class_name', 'pavillions_search', 'waiting for webpage')
     # first test - see if we got no results found - if so return the empty array
-    try:
-        # see if we got a result string back - errors out if we did not
-        returned_result = pavillions_driver.find_element_by_xpath('//*[@id="search-summary_0"]/div/div/h1')
-        #search changed on 2018-10-25
-        #returned_result = pavillions_driver.find_element_by_xpath('//*[@id="searchNrResults"]')
+    if not returned_result:
+        if pmsg: print('pavillions_search:', srchstring, ':no results returned - refresh the page we are looking at')
+        if pmsg: print('pavillions_search:actually we just return an empty list and SKIP this wine')
+        logger.info(rtnrecfmt, srchstring, 0)
+        return returnNoWineFound( winestore )
 
+    # result text
+    result_text = returned_result[0].text
+
+    # now check to see if the answer was no result
+    if re.match('No results', result_text):
         # debugging
-        if 0:
-            print ('returned result object:', returned_result)
-            print ('returned result:', returned_result.text)
-            print ('returned result tag_name:', returned_result.tag_name)
-            print ('returned result parent:', returned_result.parent)
-            print ('returned result innerHTML:', returned_result.get_attribute('innerHTML'))
-            print ('returned result Text:', returned_result.get_attribute('text'))
-            print ('returned result innerText:', returned_result.get_attribute('innerText'))
-            print ('returned result textContext:', returned_result.get_attribute('textContext'))
-            print ('returned result value:', returned_result.get_attribute('value'))
-            print ('returned result ID:', returned_result.get_attribute('id'))
-            print ('returned result name:', returned_result.get_attribute('name'))
-            print ('returned result class:', returned_result.get_attribute('class'))
-            print ('returned result type:', returned_result.get_attribute('type'))
-            
-        # we must wait for the element to show
-        while not returned_result.text:
-            print ('pavillions_search:Waiting 1 second on result text to show')
-            time.sleep(1)
-            
-        # result text
-        result_text = returned_result.text
-
-        # now check to see if the answer was no result
-        if re.match('No results', result_text):
-            # debugging
-            print ('pavillions_search:', srchstring, ':no results returned - refresh the page we are looking at')
-            # return a record that says we could not find the record
-            return found_wines
-        else:
-            # debugging
-            print('pavillions_search:following found results:',  result_text)
-    except  Exception as e:
-        print ('pavillions_search:search-summary_0 - not found for (' + srchstring + ') - result were found - error:', str(e))
-        print ('pavillions_search:type:', type(e))
-        print ('pavillions_search:args:', e.args)
-        print ('pavillions_search:exitting program due to error:debug why we did not get back search-summary_0')
-        saveBrowserContent( pavillions_driver, 'pav', 'pavillions_search' )
-        # test a modified case to see if we can debug this some more (2018-10-25)
-        try:
-            returned_result = pavillions_driver.find_element_by_xpath('//*[@id="search-summary_0"')
-            print('pavillions_search:id="search-summary_0":found this xpath')
-        except Exception as e:
-            print('pavillions_search:id="search-summary_0":NOT found')
-        if test:
-            exitWithError('quitting - debug in the browser please')
-
-        print('pavillions_search:actually we just return an empty list and SKIP this wine')
-        return found_wines
-        # exitWithError()
+        if pmsg: print('pavillions_search:', srchstring, ':no results returned - refresh the page we are looking at')
+        logger.info(rtnrecfmt, srchstring, 0)
+        # return a record that says we could not find the record
+        return returnNoWineFound( winestore )
+    else:
+        # debugging
+        if pmsg: print('pavillions_search:following found results:',  result_text)
+        logger.info('found results:%s',  result_text)
 
     # get results back and look for the thing we are looking for - the list of things we are going to process
     titlelist = pavillions_driver.find_elements_by_class_name('product-title')
@@ -1973,27 +2496,38 @@ def pavillions_search( srchstring, pavillions_driver ):
         titlelisttext = [i.text for i in titlelist]
         pricelisttext = [i.text for i in pricelist]
         # debugging
-        print('titlelisttext:', titlelisttext)
-        print('pricelisttext:', pricelisttext)
+        if pmsg: print('titlelisttext:', titlelisttext)
+        if pmsg: print('pricelisttext:', pricelisttext)
 
     # message we have a problem
     if len(titlelist) != len(pricelist):
-        print('pavillions_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        if pmsg: print('pavillions_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        logger.info('price and name lists different length:%s:len(wine):%d:len(price):%d',srchstring,len(titlelist),len(pricelist))
+
+    # we are going to search for the min of these two lists
+    resultcount = min( len(titlelist), len(pricelist) )
 
     # debugging
-    if verbose > 5:
-        print ('pavillions_search:pricelist:', pricelist)
-    
-    # debugging
-    print('pavillions_search:', srchstring, ':returned records:',  len(pricelist))
+    if pmsg: print('pavillions_search:', srchstring, ':returned records:',  resultcount )
+    logger.info(rtnrecfmt,srchstring,  resultcount )
 
     # now loop through the wines we found
-    for index in range(len(pricelist)):
-        found_wines.append( pavillions_extract_wine_from_DOM(index,titlelist,pricelist) )
+    try:
+        for index in range(resultcount):
+            result = pavillions_extract_wine_from_DOM(winestore,index,titlelist,pricelist)
+            if result:
+                found_wines.append( result )
+    except Exception as e:
+        if pmsg: print('pavillions_search:index:',index)
+        logger.info('index:%d',index)
+        exceptionPrint( e, 'pavillions_search', 'ERROR:stale page', True, pavillions_driver, 'pav', 'pavillions_search' )
+        if pmsg: print('pavillions_search:returning found_wines:', len(found_wines))
+        logger.info('returning found_wines:%d', len(found_wines))
+        return found_wines
 
-    # debugging
-    if verbose > 5:
-        print ('pavillions_search:found_wines:', found_wines)
+
+    if not found_wines:
+        return returnNoWineFound( winestore )
 
     # return the wines we found
     return found_wines
@@ -2017,9 +2551,11 @@ def pavillions_find_search_box_by_id(driver):
     try:
         # change the variable by look up
         search_box = driver.find_element_by_id('search-img')
-        print('pavillions_find_search_box_by_id:search-img:found')
+        if pmsg: print('pavillions_find_search_box_by_id:search-img:found')
+        logger.info('search-img:found')
     except Exception as e:
-        print('pavillions_find_search_box_by_id:search-img:NOT-found')
+        if pmsg: print('pavillions_find_search_box_by_id:search-img:NOT-found')
+        logger.info('search-img:NOT-found')
 
     if not search_box.is_displayed():
         search_box = None
@@ -2037,18 +2573,26 @@ def pavillions_find_search_box_by_class_name(driver):
         counter=0
         for search_box in search_boxes:
             if search_box.is_displayed():
-                print('pavillions_find_search_box_by_class_name:ecomm-search:found at index:', counter)
+                if pmsg: print('pavillions_find_search_box_by_class_name:ecomm-search:found at index:', counter)
+                logger.info('ecomm-search:found at index:%d', counter)
                 break
             # increment the counter if we are not done
             counter+=1
         # check the final search_box
         if not search_box.is_displayed():
             search_box=None
-            print('pavillions_find_search_box_by_class_name:ecomm-search:NOT-found-displayed')
+            if pmsg: print('pavillions_find_search_box_by_class_name:ecomm-search:NOT-found-displayed')
+            logger.info('ecomm-search:NOT-found-displayed')
     except Exception as e:
-        print('pavillions_find_search_box_by_class_name:ecomm-search:NOT-found')
+        if pmsg: print('pavillions_find_search_box_by_class_name:ecomm-search:NOT-found')
+        logger.info('ecomm-search:NOT-found')
 
-    if not search_box.is_displayed():
+    # deal with the fact we did not find the search box again - by setting to None
+    if not (search_box and search_box.is_displayed()):
+        if pmsg: print('pavillions_find_search_box_by_class_name:ERROR:no search box - save screen and review')
+        logger.warning('no search box - save screen and review')
+        saveBrowserContent( driver, 'pav', 'pavillions_find_search_box_by_class_name' )
+        # make sure it is set to None
         search_box = None
 
     return search_box
@@ -2083,17 +2627,20 @@ def pavillions_find_search_box_by_xpaths(driver):
     for pavillions_search_xpath in pavillions_search_xpaths:
         # validate the search_box is visible
         try:
-            print('pavillions_find_search_box_by_xpaths:find search:', pavillions_search_xpath)
+            if pmsg: print('pavillions_find_search_box_by_xpaths:find search:', pavillions_search_xpath)
+            logger.info('find search:%s', pavillions_search_xpath)
             search_box = driver.find_element_by_xpath( pavillions_search_xpath )
         except Exception as e:
-            print('pavillions_find_search_box_by_xpaths:search box xpath not valid')
+            if pmsg: print('pavillions_find_search_box_by_xpaths:ERROR:search box xpath not valid')
+            logger.info('search box xpath not valid')
             continue
 
         # check to see the search box is visible - if not we have a problem
         if not search_box.is_displayed():
             # debugging
-            print ('pavillions_find_search_box_by_xpaths:search box is not displayed - this is a problem - try another')
-            print_html_elem('pavillions_find_search_box_by_xpaths:search_box:', 0, search_box)
+            if pmsg: print('pavillions_find_search_box_by_xpaths:ERROR:search box is not displayed - this is a problem - try another')
+            logger.info('search box is not displayed - this is a problem - try another')
+            #if pmsg: print_html_elem('pavillions_find_search_box_by_xpaths:search_box:', 0, search_box)
             # clear the search string
             pavillions_search_xpath = ''
             # close the browser because we are going to quit
@@ -2104,111 +2651,154 @@ def pavillions_find_search_box_by_xpaths(driver):
             search_box=None
         else:
             if test:
-                print('pavillions_find_search_box_by_xpaths:test-enabled:search box:found')
+                if pmsg: print('pavillions_find_search_box_by_xpaths:test-enabled:search box:found')
             # now break out of hte loop we have what we need
-            print('pavillions_find_search_box_by_xpaths:found_search_box:', pavillions_search_xpath)
+            if pmsg: print('pavillions_find_search_box_by_xpaths:found_search_box:', pavillions_search_xpath)
+            logger.info('found_search_box:%s', pavillions_search_xpath)
             # break out we have found the one we want to use
             break
 
     return search_box
 
-# set the default shopping zipcode for this browser
-def set_pavillions_shopping_zipcode(driver, defaultzip):
+
+def set_pavillions_shopping_zipcode(driver, defaultzip, storename):
     # debugging
-    print('pavillions_driver:setting zipcode')
+    if pmsg: print('set_pavillions_shopping_zipcode:setting zipcode - get url to do this')
+    logger.info('setting zipcode - get url to do this')
+
+    # drive to the page that asks us the right queston
+    if not get_url_looped( driver, 'https://www.pavilions.com/?action=changeStore', 'set_pavillions_shopping_zipcode'):
+        if pmsg: print('set_pavillions_shopping_zipcode:ERROR:never got page for this changeStore - return nothing')
+        logger.warning('never got page for this changeStore - program terminated')
+        saveBrowserContent( driver, 'pav', 'set_pavillions_shopping_zipcode' )
+        if pmsg: print('Program TERMINATED')
+        exitWithError()
+
+
+    # get the input box
+    results = find_elements_looped( driver, 'fulfillment-content__search-wrapper__input', 'by_class_name', 'set_pavillions_shopping_zipcode', 'allowing changeStore page time to render')
     
-    # drive to set the zipdoe
-    driver.get('https://shop.pavilions.com/change-zipcode.html')
-    
-    
+    if not results:
+        if pmsg: print('set_pavillions_shopping_zipcode:ERROR:never found:fulfillment-content__search-wrapper__input:', srchstring)
+        logger.warning('never found:fulfillment-content__search-wrapper__input:%s', srchstring)
+        saveBrowserContent( driver, 'pav', 'set_pavillions_shopping_zipcode' )
+        if pmsg: print('Program TERMINATED')
+        exitWithError()
+
+    # message
+    if pmsg: print('set_pavillions_shopping_zipcode:results returned:', len(results))
+    logger.info('results returned:%d', len(results))
+
+    # set the zipbox
+    zipcode_box = results[0]
+
+    # give time for this box to become displayed
+    loopcnt=6
+    while not zipcode_box.is_displayed() and loopcnt:
+        # message
+        if pmsg: print('set_pavillions_shopping_zipcode:zipcode_box is displayed:', zipcode_box.is_displayed(), ':loopcnt:', loopcnt)
+        logger.info('zipcode_box is_displayed:%s:loopcnt:%d', zipcode_box.is_displayed(), loopcnt)
+        time.sleep(2)
+        loopcnt -= 1
+
+    # message
+    if pmsg: print('set_pavillions_shopping_zipcode:zipcode_box is displayed:', zipcode_box.is_displayed())
+    logger.info('zipcode_box is_displayed:%s', zipcode_box.is_displayed())
+
     ### ZIPCODE - check to see if the zip code is selectable
     try:
-        # see if the zipcode field is here
-        if driver.find_element_by_xpath('//*[@id="zipcode"]'):
-            # debugging
-            print ('pavillions_driver:filling in the zipcode: ', defaultzip)
-            
-            # set the store to the defaultstore
-            zipcode_box = driver.find_element_by_xpath('//*[@id="zipcode"]')
-            
-            # fill in the infomratoin
-            zipcode_box.clear()
-            zipcode_box.send_keys(defaultzip)
-            zipcode_box.send_keys(Keys.RETURN)
-            
-            # debugging
-            print ('pavillions_driver:zipcode populated')
-            
-            # see if we get the response
+        zipcode_box.clear()
+        zipcode_box.send_keys(defaultzip)
+        zipcode_box.send_keys(Keys.RETURN)
+    except Exception as e:
+        exceptionPrint( e,'set_pavillions_shopping_zipcode' , 'unable to populate zipcode_box:', True, driver, 'pav', 'set_pavillions_shopping_zipcode' )
+
+    # debugging
+    if pmsg: print('set_pavillions_shopping_zipcode:zipcode populated')
+    logger.info('zipcode populated')
+
+    # now get the list of card stores returned
+    cardstore=find_elements_looped( driver, 'card-store', 'by_class_name', 'set_pavillions_shopping_zipcode', 'allow store list page to render', loopcnt=6)
+    if not cardstore:
+        if pmsg: print('set_pavillions_shopping_zipcode:ERROR:list of stores never returned')
+        logger.warning('list of stores never returned')
+        saveBrowserContent( driver, 'pav', 'set_pavillions_shopping_zipcode' )
+        if pmsg: print('Program TERMINATED')
+        exitWithError()
+        
+    if pmsg: print('set_pavillions_shopping_zipcode:list of store options obtained - step through them to find the one we want')
+    logger.info('list of store options obtained - step through them to find the one we want')
+
+    # step through these stores until we find the one we want
+    for store in cardstore:
+        if pmsg: print('set_pavillions_shopping_zipcode:stepping through stores:', store.text)
+        logger.info('stepping through stores:%s', store.text)
+        if storename in store.text:
             try:
-                shopInZip = driver.find_element_by_class_name('guest-pref-panel-zip')
-            except:
-                shopInZip = None
-                
-            while not shopInZip:
-                # pause to give time for the search page to show
-                timewait = 2
-                print ('pavillions_driver:sleep for ' + str(timewait) + ' seconds to allow the search to pop up')
-                time.sleep(timewait)
-                
-                # see if we get the response
-                try:
-                    shopInZip = driver.find_element_by_class_name('guest-pref-panel-zip')
-                except:
-                    shopInZip = None
-                    
-        else:
-            # debugging
-            print ('pavillions_driver:No zipcode to enter')
-    except  Exception as e:
-        print ('pavillions_driver:zipcode - not found for (' + defaultzip + ') - results were found - error:', str(e))
+                # we have a match
+                storebtn=store.find_element_by_class_name('card-store-btn')
+                storebtn.click()
+                # sleep here
+                if pmsg: print('set_pavillions_shopping_zipcode:clicked store button:', store.text)
+                logger.info('clicked store button:%s', store.text)
+                time.sleep(3)
+            except Exception as e:
+                exceptionPrint( e,'set_pavillions_shopping_zipcode' , 'found button and could not click it:'+storename, True, driver, 'pav', 'set_pavillions_shopping_zipcode' )
+
+            return
+
+    #debugging
+    if pmsg: print('set_pavillions_shopping_zipcode:No matching address')
+    logger.info('No matching address')
 
 
 
 # function to create a selenium driver for pavillions and enter zipcode
-def create_pavillions_selenium_driver(defaultzip):
+def create_pavillions_selenium_driver(defaultzip,storename='26022 Marguerite Pkwy'):
     global verbose
 
     # global variable that defines which search box string to use
     global pavillions_search_xpath
 
-    # debugging
-    if verbose > 0:
-        print('pavillions_driver:start:---------------------------------------------------')
-        print ('pavillions_driver:Start up webdriver.Chrome')
-    
     # Using Chrome to access web
-#    driver = webdriver.Chrome()
-    driver=create_chrome_webdriver_w3c_off()
+    driver=create_webdriver_from_global_var('pavillions_driver')
 
     # debugging
-    print ('pavillions_driver:Go to shop.pavillions.com web page')
+    if pmsg: print('pavillions_driver:Go to shop.pavillions.com web page')
+    logger.info('Go to shop.pavillions.com web page')
     
     # Open the website
-    driver.get('https://shop.pavilions.com/home.html')
+    #driver.get('https://shop.pavilions.com/home.html')
+    driver.get('https://www.pavilions.com/shop/aisles/beverages.2210.html')
 
     # check the default zip to see if it matches
-    print('pavillions_driver:check current zipcode setting')
+    if pmsg: print('pavillions_driver:check current zipcode setting')
+    logger.info('check current zipcode setting')
     driverzip = None
     try:
-        print('pavillions_driver:finding the current zipcode')
-        # read the default zip
-        shopInZip = driver.find_element_by_class_name('guest-pref-panel-zip')
+        if pmsg: print('pavillions_driver:finding the current zipcode')
+        logger.info('finding the current zipcode')
+        # pull out the current name
+        shopInZip = driver.find_element_by_class_name('reserve-nav__current-instore-text')
         # check to see if it matches
-        if shopInZip.text and shopInZip.text[-5:] == defaultzip:
+        if shopInZip.text and storename in shopInZip.text:
             # we already have the zip we want - no reason to set it
-            print('pavillions_driver:already set to defaultzip')
+            if pmsg: print('pavillions_driver:already set to defaultzip')
+            logger.info('already set to defaultzip')
             # capture the driver zip
             driverzip = defaultzip
         else:
-            print('pavillions_driver:current zip not a match')
+            if pmsg: print('pavillions_driver:current zip not a match:currently set as:', shopInZip.text)
+            logger.info('current zip not a match:currently set as:%s', shopInZip.text)
     except:
-        print('pavillions_driver:unable to lookup:guest-pref-panel-zip')
+        if pmsg: print('pavillions_driver:ERROR:unable to lookup:guest-pref-panel-zip')
+        logger.warning('unable to lookup:guest-pref-panel-zip')
 
     # lookup the zipcode if not set
     if not driverzip:
-        print('pavillions_driver:calling routine to set zipcode')
-        set_pavillions_shopping_zipcode(driver,defaultzip)
+        if pmsg: print('pavillions_driver:calling routine to set zipcode')
+        logger.info('calling routine to set zipcode')
+        set_pavillions_shopping_zipcode(driver,defaultzip,storename)
 
     ### SEARCH_BOX
 
@@ -2217,21 +2807,22 @@ def create_pavillions_selenium_driver(defaultzip):
     # 2) class_name='ecomm-search'
     # 3) xpath with a list of search pathes
     search_box = pavillions_find_search_box(driver)
-
+    
     # check to see we have a search string
     if not search_box:
-        print('create_pavillions_selenium_driver:no search box found')
+        if pmsg: print('create_pavillions_selenium_driver:ERROR:no search box found')
+        logger.warning('no search box found')
         # save this page for future research
         saveBrowserContent( driver, 'pav', 'pav_driver' )
         #
-        print('create_pavillions_selenium_driver:should have saved html')
         # close the browser because we are going to quit
         driver.quit()
         exitWithError()
         
 
     # debugging
-    print('pavillions_driver:complete:---------------------------------------------------')
+    if pmsg: print('pavillions_driver:complete:---------------------------------------------------')
+    logger.info('complete:---------------------------------------------------')
     
     # return the driver
     return driver
@@ -2244,13 +2835,13 @@ def create_pavillions_selenium_driver(defaultzip):
 
 
 # function used to extract the data from the DOM that was returned
-def winex_extract_wine_from_DOM(index,titlelist,pricelist):
+def winex_extract_wine_from_DOM(winestore,titlelist,pricelist):
     global verbose
 
     
     # extract the values
-    winename = titlelist[index].text
-    wineprice = pricelist[index].text
+    winename = titlelist[0].text
+    wineprice = pricelist[0].text
     
     # regex the price field to match our expections
     match = re.search('\$(.*)$',wineprice)
@@ -2261,15 +2852,19 @@ def winex_extract_wine_from_DOM(index,titlelist,pricelist):
     wineprice = wineprice.replace('$','').replace(',','')
 
     # return the dictionary
-    return { 'wine_store' : 'WineEx', 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : '' }
+    return { 'wine_store' : winestore, 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : winestore }
 
 
 # Search for the wine
 def winex_search( srchstring, winex_driver ):
     global verbose
 
+    winestore = 'WineEx'
+
     # debugging
-    print ('winex_search:search for:', srchstring)
+    if pmsg: print('winex_search:search for:', srchstring)
+    logger.info('search for:%s', srchstring)
+    
 
     # create the url of interest
     url = 'https://www.winex.com/catalogsearch/result/?q=%s' % srchstring
@@ -2282,81 +2877,92 @@ def winex_search( srchstring, winex_driver ):
 
     # get results back and look for the thing we are looking for - the list of things we are going to process
     winelist  = winex_driver.find_elements_by_class_name('product-item-info')
-    titlelist = winex_driver.find_elements_by_class_name('product-item-link')
-    availlist = winex_driver.find_elements_by_class_name('stock-status-wx')
-    pricelist = winex_driver.find_elements_by_class_name('price-wrapper')
-    # pricelist = finalpricelist.find_elements_by_class_name('price')
-    # calculate the min number of entries returned
-    minEntries = min( len(winelist),len(titlelist),len(availlist),len(pricelist) )
 
+    # check to see if we got an item count also
+    items = winex_driver.find_elements_by_class_name('toolbar-number')
+    itemcnt = 24
+    if items:
+        itemcnt = int(items[0].text)
+        if pmsg: print('winex_search:items returned by search:', itemcnt)
+        logger.info('items returned by search:%d', itemcnt)
 
-    # debugging
-    print('winex_search:Counts:wine,title,avail,price:', len(winelist),len(titlelist),len(availlist),len(pricelist))
-    print('winex_search:minEntries:', minEntries)
-    
-    # debugging
-    if verbose > 5:
-        for index in range(minEntries):
-            print ('index:', index)
-            if 0 and index < len(winelist):
-                print('wine:', winelist[index].text)
-            if index + 1 < len(titlelist):
-                print('title:', titlelist[index].text)
-            if index + 1 < len(pricelist):
-                print('price:', pricelist[index].text)
-            if index + 1 < len(availlist):
-                print('avail:', availlist[index].text)
+    # message
+    if pmsg: print('winex_search:found wines:', len(winelist))
+    logger.info('found wines:%d', len(winelist))
+          
+    # now step through this list of wines and pull out the wines of interest
+    index=0
+    for wine in winelist:
+        if index > itemcnt-1:
+            if pmsg: print('winex_search:skipped because index:{} greater than found wines less one:{}'.format(index, itemcnt-1))
+            logger.info('skipped because index:%d:greater than found wines less one:%d',index, itemcnt-1)
+            break
+
+        # debugging
+        # if pmsg: print('winex_search:working on index:', index)
+        didNotFail = True
+
+        try:
+            titlelist = wine.find_elements_by_class_name('product-item-link')
+            availlist = wine.find_elements_by_class_name('stock-status-wx')
+            pricelist = wine.find_elements_by_class_name('price')
+        except Exception as e:
+            if pmsg: print('winex_search:index:', index, ':was skipped due to exception:', str(e))
+            logger.info('index:%d:was skipped due to exception:%s', index, str(e))
+            titlelist = None
+            availlist = None
+            pricelist = None
+            didNotFail = False
+
+        if titlelist and availlist and pricelist:
+            if availlist[0].text == 'In Stock':
+                found_wines.append( winex_extract_wine_from_DOM(winestore,titlelist,pricelist) )
+            elif availlist[0].text == 'Out of Stock':
+                if pmsg: print('winex_search:skipped:out of stock:', titlelist[0].text)
+                logger.info('skipped:out of stock:%s', titlelist[0].text)
+        else:
+            if didNotFail and titlelist:
+                try:
+                    if pmsg: print('winex_search:index:', index, ':skipping wine missing price or availability:', titlelist[0].text)
+                    logger.info('index:%d:skipping wine missing price or availability:%s', index, titlelist[0].text)
+                except:
+                    if pmsg: print('winex_search:index:', index, ':skipping wine missing price or availability:')
+                    logger.info('index:%d:skipping wine missing price or availability:', index)
+
+        index += 1
                 
 
-    # now loop through the wines we found
-    for index in range(minEntries):
-        # if out of stock skip this entry
-        if availlist[index].text == 'Out of Stock':
-            print('winex_search:out of stock:', titlelist[index].text)
-            next
-        if verbose > 1:
-            print('index:', index)
-        try:
-            titlelist[index].text
-            found_wines.append( winex_extract_wine_from_DOM(index,titlelist,pricelist) )
-        except:
-            print('could not get the title for index:',index)
-            saveBrowserContent( winex_driver, 'winex', 'winex_search' )
-
-
     # debugging
-    if verbose > 5:
-        print ('winex_search:found_wines:', found_wines)
+    if pmsg: print('winex_search:', srchstring, ':returned records:', len(found_wines))
+    logger.info(rtnrecfmt, srchstring, len(found_wines))
+
+    if not found_wines:
+        return returnNoWineFound( winestore )
 
     # return the wines we found
     return found_wines
+
 
 # function to create a selenium driver for winexs
 def create_winex_selenium_driver(defaultzip):
     global verbose
 
-    # debugging
-    if verbose > 0:
-        print('winex_driver:start:---------------------------------------------------')
-        print ('winex_driver:Start up webdriver.Chrome')
-    
     # Using Chrome to access web
-#    driver = webdriver.Chrome()
-    driver=create_chrome_webdriver_w3c_off()
+    driver=create_webdriver_from_global_var('winex_driver')
 
     # debugging
-    print ('winex_driver:Go to www.winex.com web page')
+    if pmsg: print('winex_driver:Go to www.winex.com web page')
+    logger.info('Go to www.winex.com web page')
     
     # Open the website
-    try:
-        driver.get('https://www.winex.com')
-    except Exception as e:
-        print('winex_driver:error:', str(e))
-        print('winex_driver:failed:REMOVING this store from this run')
+    if not get_url_looped( driver, 'https://www.winex.com', 'winex_driver' ):
+        if pmsg: print('winex_driver:ERROR:removing this store from this run')
+        logger.warning('removing this store from this run')
         driver = None
 
     # debugging
-    print('winex_driver:complete:---------------------------------------------------')
+    if pmsg: print('winex_driver:complete:---------------------------------------------------')
+    logger.info('complete:---------------------------------------------------')
     
 
     # return the driver
@@ -2367,8 +2973,83 @@ def create_winex_selenium_driver(defaultzip):
 
 ### NAPA CAB ####
 
+def napacab_over21( driver, debug=False ):
+    # find the over21 button
+    btns = driver.find_elements_by_class_name('pxpop-link')
+    # loop until we clear out this btns
+    loopcnt = 4
+    while btns and loopcnt:
+        # step through the buttons
+        btncnt=0
+        for btn in btns:
+            btncnt += 1
+            try:
+                if btn.get_attribute('innerText') == "I'M OVER 21":
+                    btn.click()
+                    if pmsg: print('napacab_over21:pressed im over 21 button:', btncnt, ':', loopcnt)
+                    logger.info('pressed im over 21 button:%s:%d', btncnt, loopcnt)
+                    break
+
+            except Exception as e:
+                exceptionPrint( e, 'napacab_over21', 'tried to click the over21 button', True, driver, 'napacab', 'napacab_over21' )
+                if pmsg: print('napacab_over21:ignoring this error')
+                logger.info('ignoring this error')
+                return
+
+        # find the over21 button - should be gone
+        btns = driver.find_elements_by_class_name('pxpop-link')
+        loopcnt -= 1
+
+
+def napacab_email_signup( driver, debug=False ):
+    # find the email entry object
+    emails = driver.find_elements_by_class_name('pxpop-email')
+    # if we did something then find the close object
+    if not emails:
+        return
+
+    # clear that field - to give it focus
+    if pmsg: print('napacab_email_signup:found email popup:', len(emails))
+    if pmsg: print('napacab_email_signup:clear email field - to get focus')
+    logger.info('found email popup:%d', len(emails))
+    logger.info('clear email field - to get focus')
+    try:
+        emails[0].clear()
+    except Exception as e:
+        exceptionPrint( e, 'napacab_email_signup', 'clear email signup ', True, driver, 'napacab', 'napacab_email_signup' )
+
+
+    # find the close button
+    btns = driver.find_elements_by_class_name('pxpop-close')
+
+    # show number of buttons found
+    if pmsg: print('napacab_email_signup:found close buttons:', len(btns))
+    logger.info('found close buttons:%d', len(btns))
+    
+
+    # step through the buttons
+    btncnt = 0
+    for btn in btns:
+        btncnt += 1
+        if btn.is_displayed():
+            if pmsg: print('napacab_email_signup:press email signup close button:', btncnt)
+            logger.info('press email signup close button:%d', btncnt)
+            try:
+                btn.click()
+            except Exception as e:
+                exceptionPrint( e, 'napacab_email_signup', 'closing email signup button', True, driver, 'napacab', 'napacab_email_signup' )
+                if pmsg: print('napacab_email_signup:force click through javascript')
+                logger.info('force click through javascript')
+                driver.execute_script("arguments[0].click();", btn)
+                saveBrowser( driver, 'napacab', 'napacab_email_signup:forced click on email - get rid of this after debugging' )
+                if pmsg: print('napacab_email_signup:ignoring this error')
+                logger.info('ignoring this error')
+
+            break
+
+
 # function used to extract the data from the DOM that was returned
-def napacab_extract_wine_from_DOM(index,titlelist,pricelist):
+def napacab_extract_wine_from_DOM(winestore,index,titlelist,pricelist):
     global verbose
 
     
@@ -2385,94 +3066,163 @@ def napacab_extract_wine_from_DOM(index,titlelist,pricelist):
     wineprice = wineprice.replace('$','').replace(',','')
 
     # return the dictionary
-    return { 'wine_store' : 'NapaCab', 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : '' }
+    return { 'wine_store' : winestore, 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : winestore }
+
+
+# determine if this object is the one that tells us the number of returned entries per searched item
+def napacab_return_results( napacab_driver, srchstring ):
+    try:
+        results = napacab_driver.find_elements_by_class_name('page-heading')
+        for result in results:
+            if pmsg: print('napacab_return_results:result.text:', result.text)
+            logger.info('result.text:%s', result.text)
+            if 'result' in result.text:
+                if srchstring in result.text:
+                    return results
+                else:
+                    if pmsg: print('napacab_return_results:result.text does not contain srchstring:', srchstring)
+                    logger.info('result.text does not contain srchstring:%s', srchstring)
+                    # saveBrowserContent( napacab_driver, 'napacab', 'napacab_return_results')
+    except Exception as e:
+        if pmsg: print('napacab_return_results:selenium exception:', str(e))
+        if pmsg: print('napacab_return_results:page changed while processing - loop again')
+        logger.info('selenium exception:%s', str(e))
+        logger.info('page changed while processing - loop again')
+        # exceptionPrint( e, 'napacab_return_results', 'evaluating returned results', True, napacab_driver, 'napacab', 'napacab_return_results' )
+
+    # did not find that answer - so return back blank
+    return []
 
 
 # Search for the wine
 def napacab_search( srchstring, napacab_driver ):
     global verbose
 
-    # no wine found record
-    noWineFound =  { 'wine_store' : 'NapaCab', 'wine_name' : 'Sorry no matches were found', 'wine_price' : '1', 'wine_year' : '', 'label' : '' }
+    winestore = 'NapaCab'
+
+    # check for this dialogue before we start
+    napacab_over21( napacab_driver )
+    napacab_email_signup( napacab_driver )
 
     # Select the search box(es) and find if any are visbile - there can be more than one returned value
-    search_box = napacab_driver.find_elements_by_xpath('//*[@id="search_query"]')
+    results = napacab_driver.find_elements_by_xpath('//*[@id="search_query"]')
 
-    print('napacab_search:len search box:', len(search_box))
-    if len(search_box) > 0:
-        search_box = search_box[0]
+    # check to see if we found the search box
+    if results:
+        search_box = results[0]
     else:
-        saveBrowserContent( napacab_driver, 'napacab', 'napacab_search_box_find' )
+        if pmsg: print('napacab_search:ERROR:did not find the search box - terminating')
+        logger.error('did not find the search box - terminating')
+        saveBrowserContent( napacab_driver, 'napacab', 'napacab_search:box_find' )
         exitWithError('napacab_search:search_box length was zero')
     
     # first check to see that the search box is displayed - if not visible then click the bottom that makes it visible
     if not search_box.is_displayed():
         # debugging
-        print ('napacab_search:search box is not displayed - we want to click the button that displays it')
+        if pmsg: print('napacab_search:search box is not displayed - we want to click the button that displays it')
+        logger.info('search box is not displayed - we want to click the button that displays it')
         # make the search box visible if it is not
         napacab_driver.find_element_by_xpath('//*[@id="header-search-mobile"]/span').click()
 
     # debugging
-    print ('napacab_search:search for:', srchstring)
+    if pmsg: print('napacab_search:search for:', srchstring)
+    logger.info('search for:%s', srchstring)
 
     # send in the string to this box and press RETURN
     search_box.clear()
     search_box.send_keys(srchstring)
     search_box.send_keys(Keys.RETURN)
 
-    # pause to allow time to load the page
-    print('napacab_search:wait 3 seconds for page load')
-    time.sleep(3)
-    
+
+    # look for the page heading
+    results= napacab_return_results( napacab_driver, srchstring )
+    loopcnt = 6
+    while not results and loopcnt:
+        if pmsg: print('napacab_search:waiting for web page to respond:', loopcnt)
+        logger.info('waiting for web page to respond:%d', loopcnt)
+        loopcnt -= 1
+        time.sleep(3)
+        results= napacab_return_results( napacab_driver, srchstring )
+        
+
     # create the array that we will add to
     found_wines = []
 
-    # capture from the page the number of results returned
-    try:
-        resultsheading = napacab_driver.find_elements_by_id('search-results-heading')
-    except:
-        print('napacab_search:failed to find search-results-heading')
-        # save this page for future research
+    # check to see if we got any results
+    if not results:
+        if pmsg: print('napacab_search:ERROR:web site never responded - returning nothing and moving on:', srchstring)
+        logger.warning('web site never responded - returning nothing and moving on:%s', srchstring)
         saveBrowserContent( napacab_driver, 'napacab', 'napacab_search' )
         # return noWineFound for now - but there is a bigger issue
-        return [ noWineFound ]
+        return  returnNoWineFound( winestore )
+
+    # display what we got back
+    if pmsg: print('napacab_search:results-length:', len(results))
+    if pmsg: print('napacab_search:result.text:', results[0].text)
+    logger.info('results-length:%d', len(results))
+    logger.info('result.text:%s', results[0].text)
 
     # check to see if we got anything back
-    if resultsheading:
-        if resultsheading[0].text.split(' ')[0] == '0':
-            print ('napacab_search:returned:',noWineFound)
-            # return a record that says we could not find the record
-            return [ noWineFound ]
+    if results[0].text.split(' ')[0] == '0':
+        if pmsg: print('napacab_search:', srchstring, ':returned records: 0')
+        logger.info ( rtnrecfmt, srchstring, 0 )
+        # return a record that says we could not find the record
+        return  returnNoWineFound( winestore )
+
+    # get product informatoin
+    prodcount = napacab_driver.find_elements_by_id("search-results-product-count")
+    if pmsg: print('napacab_search:product count:', prodcount[0].text)
+    logger.info('product count:%s', prodcount[0].text)
+    if prodcount[0].text.replace('Products (','').replace(')','') == '0':
+        if pmsg: print('napacab_search:', srchstring, ':returned records: 0')
+        logger.info ( rtnrecfmt, srchstring, 0 )
+        # return a record that says we could not find the record
+        return  returnNoWineFound( winestore )
+
 
     # get results back and look for the thing we are looking for - the list of things we are going to process
     try:
         titlelist = napacab_driver.find_elements_by_class_name('card-title')
         pricelist = napacab_driver.find_elements_by_class_name('price--main')
     except:
-        print('napacab_search:failed to find card-title or price-main')
+        if pmsg: print('napacab_search:ERROR:failed to find card-title or price-main:', srchstring)
+        logger.warning('failed to find card-title or price-main:%s', srchstring)
         # save this page for future research
         saveBrowserContent( napacab_driver, 'napacab', 'napacab_search' )
         # return noWineFound for now - but there is a bigger issue
-        return [ noWineFound ]
+        return  returnNoWineFound( winestore )
         
     # message we have a problem
     if len(titlelist)*2 != len(pricelist):
-        print('napacab_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        if pmsg: print('napacab_search:price and name lists different length:',srchstring,':len(wine):',len(titlelist),':len(price):',len(pricelist))
+        logger.info('price and name lists different length:%s:len(wine):%d:len(price):%d',srchstring,len(titlelist),len(pricelist))
 
-    # debugging
-    if verbose > 5:
-        print ('napacab_search:pricelist:', pricelist)
+    # messageing
+    if pmsg: print('napacab_search:titlelist-length:', len(titlelist))
+    logger.info('titlelist-length:%d', len(titlelist))
 
-    # debugging
-    print('napacab_search:', srchstring, ':returned records:',  len(titlelist))
-    
     # now loop through the wines we found
-    for index in range(len(titlelist)):
-        found_wines.append( napacab_extract_wine_from_DOM(index,titlelist,pricelist) )
+    try:
+        for index in range(len(titlelist)):
+            found_wines.append( napacab_extract_wine_from_DOM(winestore,index,titlelist,pricelist) )
+    except Exception as e:
+        exceptionPrint( e, 'napacab_search-extract_wine_from_DOM', 'extract out wines', True, napacab_driver, 'napacab', 'napacab_search-extract_wine_from_DOM' )
+        if pmsg: print('napacab_search:moving on to next wine')
+        logger.info('napacab_search:moving on to next wine')
 
-    # debugging
-    if verbose > 5:
-        print ('napacab_search:found_wines:', found_wines)
+    # messaging
+    if pmsg: print('napacab_search:', srchstring, ':returned records:', len(found_wines))
+    logger.info(rtnrecfmt, srchstring, len(found_wines))
+
+
+    # watch to see if the popup came in after we are done
+    time.sleep(2)
+    napacab_over21( napacab_driver )
+    napacab_email_signup( napacab_driver )
+
+    # check if we have records
+    if not found_wines:
+        return  returnNoWineFound( winestore )
 
     # return the wines we found
     return found_wines
@@ -2481,67 +3231,390 @@ def napacab_search( srchstring, napacab_driver ):
 def create_napacab_selenium_driver(defaultzip):
     global verbose
 
-    # debugging
-    if verbose > 0:
-        print('napacab_driver:start:---------------------------------------------------')
-        print ("napacab:Start up webdriver.Chrome")
-    
     # Using Chrome to access web
-#    driver = webdriver.Chrome()
-    driver=create_chrome_webdriver_w3c_off()
+    driver=create_webdriver_from_global_var('napacab_driver')
 
     # debugging
-    print ('napacab_driver:Go to https://www.napacabs.com/ web page')
+    if pmsg: print('napacab_driver:Go to https://www.napacabs.com/ web page')
+    logger.info('Go to https://www.napacabs.com/ web page')
+    
     
     # Open the website
     driver.get('https://www.napacabs.com/')
 
     # try to get the search box
-    cnt=10
-    found_search_box = False
-    while(cnt):
-        try:
-            search_box = driver.find_element_by_xpath('//*[@id="search_query"]')
-        except  Exception as e:
-            # did not find the search box
-            print('napacab_driver:waiting on search box (wait 1 second):', cnt)
-            print('error:', str(e))
-            time.sleep(1)
-            cnt -= 1
-        else:
-            # get out of this loop we got what we wanted
-            found_search_box = True
-            cnt = 0
-
-    # check to see if we found the search box and if not set to none
-    if not found_search_box:
+    results = find_elements_looped( driver, '//*[@id="search_query"]', 'by_xpath', 'napacab_driver', 'waiting on search box:')
+    if not results:
+        if pmsg: print('napacab_driver:ERROR:did not find search box - removing this store for this run:', srchstring)
+        logger.warning('did not find search box - removing this store for this run:%s', srchstring)
         driver=None
-
-    # click the over21 button
-    btns = driver.find_elements_by_class_name('pxpop-link')
-    # step through the buttons
-    for btn in btns:
-        if btn.get_attribute('innerText') == "I'M OVER 21":
-            print('napacab:press im over 21 button')
-            btn.click()
-            break
     else:
-        print('napacab:never pressed the im over 21 button')
+        # check to see if there is an over21 display and button
+        napacab_over21( driver )
 
-
+    
     # debugging
-    print('napacab_driver:complete:---------------------------------------------------')
+    if pmsg: print('napacab_driver:complete:---------------------------------------------------')
+    logger.info('complete:---------------------------------------------------')
     
 
     # return the driver
     return driver
 
-# -----------------------------------------------
+
+# -----------------------------------------------------------------------
+
+#### RALPHS ####
+
+
+# function used to extract the data from the DOM that was returned
+def ralphs_extract_wine_from_DOM(winestore,index,titlelist,pricelist,sizelist):
+    global verbose
+
+    
+    # extract the values
+    winename = titlelist[index].text
+    wineprice = pricelist[index].text
+
+    # add the size to the name
+    if sizelist:
+        winename += ' ' + sizelist[index].text
+    
+    # regex the price field to match our expections
+    match = re.search('\$(.*)<',wineprice)
+    if match:
+        wineprice = match.group(1)
+    
+    # now clean up $ and ,
+    wineprice = wineprice.replace('$','').replace(',','')
+
+    # return the dictionary
+    return { 'wine_store' : winestore, 'wine_name' : winename, 'wine_price' : wineprice, 'wine_year' : '', 'label' : winestore }
+
+
+# Search for the wine
+def ralphs_search( srchstring, ralphs_driver ):
+    global verbose
+
+    winestore = 'Ralphs'
+
+    ken = '''
+    # try to get the search box
+    results = find_elements_looped(ralphs_driver, 'SearchButton', 'by_class_name', 'ralphs_search', 'find search box')
+    if not results:
+        if pmsg: print('ralphs_search:ERROR:did not find search box')
+        return []
+
+    if pmsg: print('ralphs_search:search box count:', len(results))
+
+    # set the variable
+    search_box = results[0]
+
+    if pmsg: print('ralphs_search:search box is_dislayed:', search_box.is_displayed())
+    input()
+    
+
+    # debugging
+    if pmsg: print('ralphs_search:search for:', srchstring)
+
+    # send in the string to this box and press RETURN
+    search_box.clear()
+    search_box.send_keys(srchstring)
+    search_box.send_keys(Keys.RETURN)
+'''
+
+    # debugging
+    if pmsg: print('ralphs_search:search for:', srchstring)
+    logger.info('search for:%s', srchstring)
+
+    # create the search URL and then search
+    url = 'https://www.ralphs.com/search?query={}%20wine&searchType=natural&fulfillment=all'.format(srchstring)
+    ralphs_driver.get(url)
+
+    # create the array that we will add to
+    found_wines = []
+
+    # get back the results
+    results = find_elements_looped(ralphs_driver, 'ContainerGrid-header-title', 'by_class_name', 'ralphs_search', 'search results')
+    if not results:
+        if pmsg: print('ralphs_search:ERROR:never got a result from the search:', srchstring)
+        logger.warning('never got a result from the search:%s', srchstring)
+        # put in saveBrowser here
+        return []
+
+    loopcnt=4
+    while results[0].text.startswith('Search') and loopcnt:
+        if pmsg: print('ralphs_search:result count not populated yet - wait')
+        logger.info('result count not populated yet - wait:%d', loopcnt)
+        time.sleep(2)
+        loopcnt -= 1
+
+    # message
+    if pmsg: print('ralphs_search:len result:', len(results))
+    if pmsg: print('ralphs_search:results[0].text:', results[0].text)
+    logger.info('len result:%d', len(results))
+    logger.info('results[0].text:%s', results[0].text)
+
+    # check to see if we got any results
+    resultcnt = int(results[0].text.split()[0])
+    if not resultcnt:
+        if pmsg: print('ralphs_search:no results for:',srchstring)
+        logger.info('no results for:%s',srchstring)
+        return returnNoWineFound( winestore )
+    
+    # messaging
+    if pmsg: print('ralphs_search:result count:', resultcnt)
+    logger.info('result count:%d', resultcnt)
+
+    
+    # get the count from wine list
+    loopcnt = 4
+    winelist = ralphs_driver.find_elements_by_class_name('ProductCard')
+    while loopcnt and (not winelist or len(winelist) < resultcnt):
+        if pmsg: print('ralphs_search:len(winelist)<resultcnt:wait:', loopcnt)
+        logger.info('len(winelist)<resultcnt:wait:%d', loopcnt)
+        time.sleep(2)
+        loopcnt -= 1
+        winelist = ralphs_driver.find_elements_by_class_name('ProductCard')
+
+
+    # messaging
+    if pmsg: print('ralphs_search:winelist count:', len(winelist))
+    logger.info('winelist count:%d', len(winelist))
+
+    # debugging opportunity
+    if len(winelist) != resultcnt:
+        if pmsg: print('ralphs_search:DEBUGGING:resultcnt does not match winelist')
+        logger.info('DEBUGGING:resultcnt does not match winelist')
+        #saveBrowserContent( ralphs_driver, 'ralphs', 'ralphs_search:winelist-not-match-resultcnt')
+    
+    # step through the winelist
+    index=0
+    for item in winelist:
+        
+        # get results back and look for the thing we are looking for - the list of things we are going to process
+        titlelist = item.find_elements_by_class_name('kds-Text--m')
+        pricecontainerlist  = item.find_elements_by_class_name('kds-Price')
+        priceoriglist = item.find_elements_by_class_name('kds-Price-original')
+        pricepromolist = item.find_elements_by_class_name('kds-Price-promotional')
+        availlist = item.find_elements_by_class_name('AvailableModalities-line1')
+        sizelist = item.find_elements_by_class_name('ProductCard-sellBy-unit')
+
+        # debugging
+        # if pmsg: print('ralphs_search:lengths:index:{},title:{},pricepromo:{},pricecontainer:{},priceorig:{}'.format(index,len(titlelist),len(pricepromolist),len(pricecontainerlist),len(priceoriglist)))
+
+        # extract out the wine and price
+        try:
+            if pricepromolist:
+                found_wines.append( ralphs_extract_wine_from_DOM(winestore,0,titlelist,pricepromolist,sizelist) )
+            else:
+                found_wines.append( ralphs_extract_wine_from_DOM(winestore,0,titlelist,pricecontainerlist,sizelist) )
+        except Exception as e:
+            # failed - so message nad return what we found
+            if pmsg: print('ralphs_extract_wine_DOM:index:', index)
+            logger.info('index:%d', index)
+            exceptionPrint( e, 'ralphs_extract_wine_from_DOM', 'ERROR:page is stale:'+srchstring, True, ralphs_driver, 'ralphs', 'ralphs_search')
+            return found_wines
+
+
+        # debugging - look at the availlist
+        try:
+            # debugging for now
+            if availlist:
+                if availlist[0].text != 'Pickup & Delivery Available':
+                    if pmsg: print('ralphs_search:debugging:', titlelist[0].text, ':', availlist[0].text)
+                    logger.info('debugging:%s:%s', titlelist[0].text, availlist[0].text)
+        except Exception as e:
+            if pmsg: print('ralphs_availlist_print:', index)
+            logger.info('index:%d', index)
+            exceptionPrint( e, 'ralphs_availlist_print', 'availlist-print:'+srchstring, True, ralphs_driver, 'ralphs', 'ralphs_search')
+
+        # increment counter
+        index += 1
+
+    # debugging
+    if pmsg: print('ralphs_search:', srchstring, ':returned records:', len(found_wines))
+    logger.info(rtnrecfmt, srchstring, len(found_wines))
+
+    if not found_wines:
+        return returnNoWineFound( winestore )
+
+    # return the wines we found
+    return found_wines
+
+
+# set the store from the dialogue
+def ralphs_set_store( driver, defaultzip, storename, dataTestID ):
+    # find the zip code box
+    zip = driver.find_elements_by_class_name('kds-Input--compact')
+    if zip:
+        if pmsg: print('ralphs_set_store:found zip box - populating with:', defaultzip)
+        logger.info('found zip box - populating with:%s', defaultzip)
+        zip[0].clear()
+        zip[0].send_keys(defaultzip)
+        zip[0].send_keys(Keys.RETURN)
+
+    # now wait a second to allow screen to update
+    if pmsg: print('ralphs_set_store:wait 2 seconds')
+    logger.info('wait 2 seconds')
+    time.sleep(2)
+
+    # get the list of buttons and search for the one that we want
+    selectbtns = driver.find_elements_by_class_name('AvailableModality--Button')
+    for btn in selectbtns:
+        if btn.get_attribute('aria-label') == 'In-Store [object Object]   Select Store':
+            if pmsg: print('ralphs_set_store:found the instore select button - click it')
+            logger.info('found the instore select button - click it')
+            btn.click()
+            break
+
+    # now find the button tied to the store we want to select
+    storebtns = driver.find_elements_by_class_name('kds-Button')
+    for store in storebtns:
+        # debugging
+        if pmsg: print('ralphs_set_store:checking button:', store.get_attribute('data-testid'))
+        logger.info('checking button:%s', store.get_attribute('data-testid'))
+        if store.get_attribute('data-testid') == dataTestID:
+            if pmsg: print('ralphs_set_store:found store of interest:', dataTestID)
+            if pmsg: print('ralphs_set_store:storename:', store.get_attribute('aria-label'))
+            if pmsg: print('ralphs_set_store:click this button:', store.text)
+            logger.info('found store of interest:%s', dataTestID)
+            logger.info('storename:%s', store.get_attribute('aria-label'))
+            logger.info('click this button:%s', store.text)
+            store.click()
+            if pmsg: print('ralphs_set_store:returning')
+            logger.info('returning')
+            return
+        
+    if pmsg: print('ralphs_set_store:NEVER found store of interest:', dataTestID)
+    logger.info('NEVER found store of interest:%s', dataTestID)
+
+        
+# select the store
+def ralphs_select_store( driver, defaultzip, storename, dataTestID ):
+    # find the current store selected
+    results = find_elements_looped(driver, 'CurrentModality-vanityName', 'by_class_name', 'ralphs_select_store', 'find current selected store')
+
+    # did not find a selected store
+    if not results:
+        if pmsg: print('ralphs_select_store:ERROR:did not find current setting')
+        logger.warning('did not find current setting')
+        saveBrowserContent( driver, 'ralphs', 'ralphs_select_store:find current selected store' )
+
+    # found the store compare it
+    if results[0].text == storename:
+        if pmsg: print('ralphs_select_store:store selected is correct:', storename)
+        logger.info('store selected is correct:%s', storename)
+        return
+
+    # message
+    if pmsg: print('ralphs_select_store:store not the one we want:', results[0].text)
+    if pmsg: print('ralphs_select_store:check for zip code entry box')
+    logger.info('store not the one we want:%s', results[0].text)
+    logger.info('check for zip code entry box')
+    
+    # not the store we want - so lets see if
+    zip = driver.find_elements_by_class_name('kds-Input--compact')
+    if not zip:
+        if pmsg: print('ralphs_select_store:change store dialogue not visible')
+        logger.info('change store dialogue not visible')
+        openDialoge = driver.find_elements_by_class_name('CurrentModality-rightArrow')
+        if openDialoge:
+            if pmsg: print('ralphs_select_store:found arrow to open dialogue - click it')
+            logger.info('found arrow to open dialogue - click it:%d', len(openDialoge))
+            openDialoge[0].click()
+            # now check that we got what we were looking for
+            
+    # now set the store
+    ralphs_set_store( driver, defaultzip, storename, dataTestID )
+    
+def ralphs_select_store_start( driver, defaultzip, storename, dataTestID ):
+    # look the current setting
+    # try to get the search box
+    results = find_elements_looped(driver, 'ReactModal__Content--after-open', 'by_class_name', 'ralphs_select_store_start', 'find current selected store')
+
+    # check to see if dialogue showed up and if not move on
+    if not results:
+        if pmsg: print('ralphs_select_store_start:dialogue did not show - skipping')
+        logger.info('dialogue did not show - skipping')
+        return
+
+    # found the store compare it
+    storelist = results[0].find_elements_by_class_name('kds-Text--l')
+    if storelist and storelist[1].text == storename:
+        if pmsg: print('ralphs_select_store_start:desired store already selected:', storename)
+        logger.info('desired store already selected:%s:%s', 'kds-Text--l', storename)
+        return
+    elif storelist:
+        logger.info('no match on storelist:%s:%d', 'kds-Text--l', len(storelist))
+        if pmsg: print(storelist[1].text)
+        for store in storelist:
+            if pmsg: print(store.text)
+            logger.info('store.text:%s', store.text)
+            
+    storelist = results[0].find_elements_by_class_name('CurrentModality-modalityType')
+    if storelist and storelist[1].text == storename:
+        if pmsg: print('ralphs_select_store_start:desired store already selected:', storename)
+        logger.info('desired store already selected:%s:%s', 'CurrentModality-modalityType', storename)
+        return
+    elif storelist:
+        logger.info('no match on storelist:%s:%d', 'CurrentModality-modalityType', len(storelist))
+
+    # not the store we want - click the change button
+    changebtns = results[0].find_elements_by_class_name('DynamicTooltip--Button--Change')
+    if changebtns:
+        if pmsg: print('ralphs_select_store_start:change button text:', changebtns[0].text)
+        if pmsg: print('ralphs_select_store_start:change button is_displayed:', changebtns[0].is_displayed())
+        if pmsg: print('ralphs_select_store_start:change button clicked')
+        logger.info('change button text:%s', changebtns[0].text)
+        logger.info('change button is_displayed:%s', changebtns[0].is_displayed())
+        logger.info('change button clicked')
+        changebtns[0].click()
+
+    # this causes the set store dialogue to show up - call that script
+    ralphs_set_store( driver, defaultzip, storename, dataTestID )
+
+# function to create a selenium driver for ralphs and get past popup
+def create_ralphs_selenium_driver(defaultzip, storename, dataTestID):
+    global verbose
+
+    # Using Chrome to access web
+    driver=create_webdriver_from_global_var('ralphs_driver')
+
+    # Open the website
+    driver.get('https://www.ralphs.com/')
+
+    # try to get the search box
+    results = find_elements_looped(driver, 'searchInputWrapper', 'by_class_name', 'ralphs_driver', 'find search box')
+
+    # check to see if we found the search box and if not set to none
+    if not results:
+        if pmsg: print('create_ralphs_selenium_driver:ERROR:did not find search string - setting driver to none')
+        logger.warning('did not find search string - setting driver to none')
+        saveBrowserContent( driver, 'ralphs', 'create_ralphs_selenium_driver' )
+        driver=None
+
+    # check to see if we have the prompting dialogue
+    ralphs_select_store_start( driver, defaultzip, storename, dataTestID )
+
+    # validate we have the store we wanted
+    ralphs_select_store( driver, defaultzip, storename, dataTestID )
+
+    # debugging
+    if pmsg: print('ralphs_driver:complete:---------------------------------------------------')
+    logger.info('complete:---------------------------------------------------')
+    
+
+    # return the driver
+    return driver
+
+
+# --------------------------------------------------------------------------
 
 
 
 # routine use by email parser to grab the results for one wine
-def get_wines_from_stores( srchstring_list, storelist, debug=False ):
+def get_wines_from_stores( srchstring_list, storelist, optiondict={}, debug=False ):
     global verbose
 
 
@@ -2558,7 +3631,7 @@ def get_wines_from_stores( srchstring_list, storelist, debug=False ):
     if 'hitime' in storelist:
         hitime_driver = create_hitime_selenium_driver('92688')
     if 'totalwine' in storelist:
-        totalwine_driver = create_totalwine_selenium_driver('Laguna Hills')
+        totalwine_driver = create_totalwine_selenium_driver('Laguna Hills', optiondict)
         # if we did not get a valid driver - then we are not using this store.
         if totalwine_driver == None:  storelist.remove('totalwine')
     if 'wally' in storelist:
@@ -2579,38 +3652,38 @@ def get_wines_from_stores( srchstring_list, storelist, debug=False ):
         if 'bevmo' in storelist:
             found_wines.extend( bevmo_search( srchstring, bevmo_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'pavillions' in storelist:
             found_wines.extend( pavillions_search( srchstring, pavillions_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'wineclub' in storelist:
             found_wines.extend( wineclub_search( srchstring, wineclub_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'totalwine' in storelist:
-            found_wines.extend( totalwine_search( srchstring, totalwine_driver ) )
+            found_wines.extend( totalwine_search( srchstring, totalwine_driver, optiondict ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'hitime' in storelist:
             found_wines.extend( hitime_search( srchstring, hitime_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'wally' in storelist:
             found_wines.extend( wally_search( srchstring, wally_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'winex' in storelist:
             found_wines.extend( winex_search( srchstring, winex_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'napacab' in storelist:
             found_wines.extend( napacab_search( srchstring, napacab_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
 
         # debugging
-        if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+        if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
 
 
 
@@ -2647,40 +3720,57 @@ if __name__ == '__main__':
     verbose = optiondict['verbose']
     AppVersion = optiondict['AppVersion']
 
+    # check if the browser is set
+    if optiondict['browser'] in ('ff', 'firefox'):
+        browser = 'firefox'
+
     # from the command line
     wineoutfile = optiondict['wineoutfile']
     winexlatfile = optiondict['winexlatfile']
     
     # dump out what we have done here
     if test:
-        print ('---------------TEST FLAG ENABLED---------------------------')
+        if pmsg: print('---------------TEST FLAG ENABLED---------------------------')
+        if pmsg: print('test:browser:', browser)
+        logger.info('----TEST FLAG ENABLED---------------------------')
+        logger.info('test:browser:%s', browser)
 
-
+        
     # check to see if we passed in srchlist instead of srchstring
     if optiondict['srchlist'] and not optiondict['srchstring']:
-        print('srchlist was passed in INSTEAD of srchstring - substituting')
+        if pmsg: print('srchlist was passed in INSTEAD of srchstring - substituting')
+        logger.info('srchlist was passed in INSTEAD of srchstring - substituting')
         optiondict['srchstring'] = optiondict['srchlist']
     
 
     # debugging
     if verbose > 0:
-        print ('---------------STARTUP(v', optiondictconfig['AppVersion']['value'], ')-(', datetime.datetime.now().strftime('%Y%m%d:%T'), ')---------------------------')
+        if pmsg: print('---------------STARTUP(v', optiondictconfig['AppVersion']['value'], ')-(', datetime.datetime.now().strftime('%Y%m%d:%T'), ')---------------------------')
+    logger.info('STARTUP(v%s)%s', optiondictconfig['AppVersion']['value'], '-'*40)
 
     # define the store list - all the stores we COULD process
     storelist = [
         'bevmo',
         'hitime',
         'pavillions',
-        'totalwine',
+#        'totalwine',  #commented out because we call this all by itself
         'wineclub',
         'wally',
         'winex',
-        'napacab',
+#        'napacab',  #  moved this back to winerequest to get the performance back
+        'ralphs',
     ]
+
+    ##### STORELIST ######
 
     # check to see if we got a command line store list
     if optiondict['storelist']:
         storelist = [ optiondict['storelist'] ]
+    elif optiondict['store_list']:
+        if pmsg: print('store_list was passed INSTEAD of storelist - substituting')
+        logger.info('store_list was passed INSTEAD of storelist - substituting')
+        storelist = [ optiondict['store_list'] ]
+
 
     # uncomment this line if you want to limit the number of stores you are working
     #storelist = ['wally']
@@ -2692,7 +3782,24 @@ if __name__ == '__main__':
         if optiondict['storelist']:
             storelist = [ optiondict['storelist'] ]
         # display what it is we are going after
-        print('test:storelist:', storelist)
+        if pmsg: print('test:storelist:', storelist)
+        logger.info('test:storelist:%s', storelist)
+
+    #### TOTAL WINE - Gmail Password Test ######
+
+    # test to see the password was passed in
+    if 'totalwine' in storelist and not optiondict['EmailFromPassword']:
+        if pmsg: print('wineselenium.py:you must set the EmailFromPassword for account:', optiondict['EmailFromAddr'])
+        if pmsg: print('TERMINATING')
+        logger.error('you must set the EmailFromPassword for account:%s', optiondict['EmailFromAddr'])
+        logger.error('TERMINATING')
+        sys.exit(1)
+
+    # debugging
+    logger.info('storelist:%s', storelist)
+
+
+    ### SEARCH LIST ####
 
     # srchstring - set at None - then we will look up the information from the file
     srchstring_list = None
@@ -2719,62 +3826,88 @@ if __name__ == '__main__':
                 srchstring_list = None
             else:
                 srchstring_list = [ optiondict['srchstring'] ]
-        print('test:srchstring_list:', srchstring_list)
+        if optiondict['srchstring_list']:
+            srchstring_list = optiondict['srchstring_list']
+            
+        if pmsg: print('test:srchstring_list:', srchstring_list)
+        logger.info('test:srchstring_list:%s', srchstring_list)
 
     # if not user defined - generate the list if we don't have one predefined
     if srchstring_list == None:
-        print('wineselenium.py:load list of wines from:',wineinputfile)
         srchstring_list = get_winelist_from_file( wineinputfile )
         remove_already_processed_wines( wineoutfile, srchstring_list )
         if not srchstring_list:
-            print('main:no wines to search for - ending program')
+            if pmsg: print('main:no wines to search for - ending program')
+            logger.info('no wines to search for - ending program')
             sys.exit()
 
-    # load in xlat file in to a global variable
-    store_wine_lookup = read_wine_xlat_file( winexlatfile, debug=verbose )
+
+    ### WINE_XLAT ####
+
+    # load in xlat file in to a module level variable
+    read_wine_xlat_file( winexlatfile, debug=verbose )
 
     # create each of the store drivers we need to use
     if 'totalwine' in storelist:
-        totalwine_driver = create_totalwine_selenium_driver('Laguna Hills')
+        totalwine_driver = create_totalwine_selenium_driver('Laguna Hills', optiondict)
         # if we did not get a valid driver - then we are not using this store.
         if totalwine_driver == None:  
             storelist.remove('totalwine')
-            print('main:FAILED:removed store from search:totalwine')
+            logger.warning('removing store from this run:totalwine')
+            if pmsg: print('main:FAILED:removed store from search:totalwine')
     if 'bevmo' in storelist:
-        bevmo_driver = create_bevmo_selenium_driver('Ladera Ranch', '2962', optiondict['bevmoretrycount'], optiondict['waitonerror'])
+        bevmo_driver = create_bevmo_selenium_driver('Ladera Ranch', '2962', retrycount=3)
         # if we did not get a valid driver - then we are not using this store.
         if bevmo_driver == None:  
             storelist.remove('bevmo')
-            print('main:FAILED:removed store from search:bevmo')
+            logger.warning('removing store from this run:bevmo')
+            if pmsg: print('main:FAILED:removed store from search:bevmo')
     if 'pavillions' in storelist:
-        pavillions_driver = create_pavillions_selenium_driver('92688')
+        pavillions_driver = create_pavillions_selenium_driver('92692')
     if 'wineclub' in storelist:
         wineclub_driver = create_wineclub_selenium_driver('92688')
         # if we did not get a valid driver - then we are not using this store.
         if wineclub_driver == None:  
             storelist.remove('wineclub')
-            print('main:FAILED:removed store from search:wineclub')
+            logger.warning('removing store from this run:wineclub')
+            if pmsg: print('main:FAILED:removed store from search:wineclub')
     if 'hitime' in storelist:
         hitime_driver = create_hitime_selenium_driver('92688')
     if 'wally' in storelist:
         wally_driver = create_wally_selenium_driver('')
         if wally_driver == None:
             storelist.remove('wally')
-            print('main:FAILED:removed store from search:wally')
+            logger.warning('removing store from this run:wally')
+            if pmsg: print('main:FAILED:removed store from search:wally')
     if 'winex' in storelist:
         winex_driver = create_winex_selenium_driver('')
         if winex_driver == None:  storelist.remove('winex')
     if 'napacab' in storelist:
         napacab_driver = create_napacab_selenium_driver('92688')
+    if 'ralphs' in storelist:
+        ralphs_driver = create_ralphs_selenium_driver('92677', 'La Paz & Marguerite S/C', "SelectStore-70300076")
+        # if we did not get a valid driver - then we are not using this store.
+        if ralphs_driver == None:  
+            storelist.remove('ralphs')
+            logger.warning('removing store from this run:ralphs')
+            if pmsg: print('main:FAILED:removed store from search:ralphs')
+        
                
                
     # dump out what we have done here
     if verbose > 0:
-        print ('------------------------------------------')
-        print ('wineselenium.py:version:',AppVersion)
-        print ('wineselenium.py:srchstring_list:', srchstring_list)
-        print ('wineselenium.py:storelist:', storelist)
-        print ('------------------------------------------')
+        if pmsg: print('------------------------------------------')
+        if pmsg: print('wineselenium.py:version:',AppVersion)
+        if pmsg: print('wineselenium.py:storelist:', storelist)
+        if pmsg: print('wineselenium.py:wineoutfile:', wineoutfile)
+        if pmsg: print('wineselenium.py:srchstring_list:', srchstring_list)
+        if pmsg: print('------------------------------------------')
+
+        logger.info('version:%s',AppVersion)
+        logger.info('storelist:%s', storelist)
+        logger.info('wineoutfile:%s', wineoutfile)
+        logger.info('srchstring_list:%s', srchstring_list)
+        logger.info('%s', '-'*40)
         
     # step through the list
     for srchstring in srchstring_list:
@@ -2783,40 +3916,46 @@ if __name__ == '__main__':
         # find the wines for this search string
         # find the wines for this search string
         if 'bevmo' in storelist:
-            found_wines.extend( bevmo_search( srchstring, bevmo_driver, optiondict['waitonerror'] ) )
+            found_wines.extend( bevmo_search( srchstring, bevmo_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'pavillions' in storelist:
             found_wines.extend( pavillions_search( srchstring, pavillions_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'wineclub' in storelist:
             found_wines.extend( wineclub_search( srchstring, wineclub_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'totalwine' in storelist:
-            found_wines.extend( totalwine_search( srchstring, totalwine_driver ) )
+            found_wines.extend( totalwine_search( srchstring, totalwine_driver, optiondict ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'hitime' in storelist:
             found_wines.extend( hitime_search( srchstring, hitime_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'wally' in storelist:
             found_wines.extend( wally_search( srchstring, wally_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'winex' in storelist:
             found_wines.extend( winex_search( srchstring, winex_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
         if 'napacab' in storelist:
             found_wines.extend( napacab_search( srchstring, napacab_driver ) )
             # debugging
-            if verbose > 5: print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+        # find the wines for this search string
+        if 'ralphs' in storelist:
+            found_wines.extend( ralphs_search( srchstring, ralphs_driver ) )
+            # debugging
+            if verbose > 5: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
 
         # debugging
-        print ('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+        if pmsg: print('wineselenium.py:', srchstring, ' count of wines found:', len(found_wines))
+        logger.info( '%s:count of wines found:%d', srchstring, len(found_wines) )
 
         # call the print routine
         save_wines_to_file(wineoutfile, srchstring, found_wines)
@@ -2839,5 +3978,7 @@ if __name__ == '__main__':
         winex_driver.quit()
     if 'napacab' in storelist:
         napacab_driver.quit()
+    if 'ralphs' in storelist:
+        ralphs_driver.quit()
 
 # eof

@@ -1,7 +1,20 @@
+'''
+@author:   Ken Venner
+@contact:  ken@venerllc.com
+@version:  1.06
+
+Tools used to process wine lookups via email
+'''
+
+
 import wineselenium
 import winerequest
 import kvcsv
 import kvutil
+
+import kvlogger
+logger=kvlogger.getLogger(__name__)
+
 
 from operator import itemgetter
 
@@ -117,20 +130,45 @@ def html_body_from_email_subject(subject_srchstring, winesel_storelist, winereq_
         hdrnames = ['Store','Wine','Price']
         
     htmlbodytop = '<html><body>\n'
+    htmlbodytop = '''
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "https://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="https://www.w3.org/1999/xhtml">
+<head>
+<title>Wine Lookup</title>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0 " />
+<style>
+table {
+  border-collapse: collapse;
+}
+
+table, td, th {
+  border: 1px solid black;
+}
+</style>
+</head>
+<body>
+'''
+
     htmlbodybtm = '</body></html>\n'
     
-    # debugging
-    print('wineutil:html_body_from_email_subject:subject:', subject_srchstring)
-
     # get the first word from the search string
     srchstring = subject_srchstring.split()[0]
+
+    # debugging
+    logger.info('subject:%s', subject_srchstring)
+    logger.info('srchstring:%s', srchstring)
+    logger.info('winesel_storelist:%s', winesel_storelist)
+    logger.info('winereq_storelist:%s', winereq_storelist)
 
     # create array to hold the search results
     found_wines = []
     # get information from Selenium wineries
+    logger.info('calling wineselenium')
     found_wines.extend( wineselenium.get_wines_from_stores( [srchstring], winesel_storelist, debug=debug ) )
     # get information from the request wineries
-    print('call winerequest')
+    logger.info('calling winerequest')
     found_wines.extend( winerequest.get_wines_from_stores( [srchstring], winereq_storelist, debug=debug ) )
 
     # debugging
@@ -138,8 +176,12 @@ def html_body_from_email_subject(subject_srchstring, winesel_storelist, winereq_
         print('found_wines:', found_wines)
         print('-'*80)
 
-    # add ranking to the founbd records
+    # messaging
+    logger.info('wine count to be ranked:%d', len(found_wines))
+
+    # add ranking to the found records
     rank_records( found_wines, subject_srchstring )
+
     # create a sorted list based on the ranking
     sorted_wines = sorted(found_wines, key=itemgetter('search_hits'))
 
@@ -169,6 +211,10 @@ def html_body_from_email_subject(subject_srchstring, winesel_storelist, winereq_
             f.write(htmlbodybtm)
         print('check out:ken2.html - UNsorted')
 
+    logger.debug('htmlbodytop:%s', htmlbodytop)
+    logger.debug('list2htmltbl:%s', list2htmltbl( sorted_wines, dictkeys, tblheader=True, hdrnames=hdrnames) )
+    logger.debug('htmlbodybtm:%s', htmlbodybtm)
+
     # return the html body
     return htmlbodytop + list2htmltbl( sorted_wines, dictkeys, tblheader=True, hdrnames=hdrnames) + '\n' + htmlbodybtm
     
@@ -184,7 +230,7 @@ if __name__ == '__main__':
 
     # (wine) selenium stores
     winesel_storelist = [
-        'bevmo',
+#        'bevmo',
         'hitime',
         'pavillions',
         'totalwine',
