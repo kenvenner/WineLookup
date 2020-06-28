@@ -1,7 +1,7 @@
 '''
 @author:   Ken Venner
 @contact:  ken@venerllc.com
-@version:  1.23
+@version:  1.28
 
 Tool used to create an email watcher and process inbound emails
 and return back a list of wines that match the subject
@@ -21,19 +21,28 @@ import wineutil
 import time
 
 # Logging Setup
-import os
-import logging
-# logging.basicConfig(level=logging.INFO)
-logging.basicConfig(filename=os.path.splitext(os.path.basename(__file__))[0]+'.log',
-                    level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(threadName)s -  %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+import sys
+import kvlogger
+config=kvlogger.get_config(kvutil.filename_create(__file__, filename_ext='log'))
+kvlogger.dictConfig(config)
+logger=kvlogger.getLogger(__name__)
+
+# added logging feature to capture and log unhandled exceptions
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = handle_exception
+
 
 
 # application variables
 optiondictconfig = {
     'AppVersion' : {
-        'value' : '1.23',
+        'value' : '1.28',
         'description' : 'defines the version number for the app',
     },
     'debug' : {
@@ -50,6 +59,19 @@ optiondictconfig = {
         'value' : 60,
         'type' : 'int',
         'description' : 'defines the number of seconds to sleep between runs',
+    },
+    'email_forward' : {
+        'value' : 'ken@vennerllc.com',
+        'description' : 'defines the email address that we forward unprocessed emails to',
+    },
+    'mime_dir' : {
+        'value' : 'msg',
+        'description' : 'defines the directory where we put mime files we create and then send out again',
+    },
+    'valid_emails' : {
+        'value' : ['ken@vennerllc.com','ken_venner@yahoo.com','ken@e-share.us','ken@attunewines','ken@auteurwines.com','debbie_venner@yahoo.com'],
+        'type'  : 'liststr',
+        'description' : 'defines the list of email addresses we will process requests from for wine lookup',
     },
 }
 
@@ -104,6 +126,7 @@ def gmail_poll_by_function(base_email_settings, winesel_storelist, wine2_storeli
     #for i in range(30):
     while True:
         # debugging
+        logger.debug('select_folder:%s', base_email_settings['imap_folder'])
         if debug:
             print('select_folder:', base_email_settings['imap_folder'])
         
@@ -142,7 +165,7 @@ def gmail_poll_by_function(base_email_settings, winesel_storelist, wine2_storeli
             # print the subject
             logger.info('msgid:%s:subject:%s', msgid, mparse.subject)
             logger.info('from:%s', mparse.from_email)
-            
+
             # process this email message
             try:
                 # setup the email sender
@@ -150,14 +173,41 @@ def gmail_poll_by_function(base_email_settings, winesel_storelist, wine2_storeli
                 # check if undeliverable is in the subject
                 if reUndeliverable.search(mparse.subject):
                     logger.info('Undeliverable in the subject - skippping this message')
+                elif 'wine_rpt.py' in mparse.subject:
+                    # check the subject if it is from wine_email.py - then
+                    # don't process this message just forward it to someone
+                    # that can deal with it
+                    logger.info('reply to wine_rpt.py - save messages in:%s', optiondict['mime_dir'])
+                    msg_dir= kvgmailrcv.save_message(mparse, optiondict['mime_dir'])
+                    logger.info('reply to wine_rpt.py - message save in:%s', msg_dir)
+                    logger.info('reply to wine_rpt.py - forward message to:%s', optiondict['email_forward'])
+                    m.addRecipients([optiondict['email_forward']])
+                    m.setSubject('Wines@vennerllc.com Forwarded Email:{}'.format(msg_dir))
+                    m.setHtmlBody(mparse.body)
+                    m.send()
+                    logger.info('forwarded message sent')
+                elif mparse.from_email[0] not in optiondict['valid_emails']:
+                    # check who this message came from and assure it is from a valid list
+                    # don't process this message just forward it to someone
+                    # that can deal with it
+                    logger.info('invalid from_email:%s:save messages in:%s', mparse.from_email[0], optiondict['mime_dir'])
+                    msg_dir= kvgmailrcv.save_message(mparse, optiondict['mime_dir'])
+                    logger.info('invalid from_email - message save in:%s', msg_dir)
+                    logger.info('invalid from_email - forward message to:%s', optiondict['email_forward'])
+                    m.addRecipients([optiondict['email_forward']])
+                    m.setSubject('Wines@vennerllc.com Forwarded Email:{}'.format(msg_dir))
+                    m.setHtmlBody(mparse.body)
+                    m.send()
+                    logger.info('forwarded message sent')
                 else:
                     logger.info('Processing email subject:%s', mparse.subject)
+                    logger.info('Reply to:%s', mparse.from_email)
                     m.addRecipients(mparse.from_email)
                     if mparse.cc_mail:
                         m.addRecipients(mparse.cc_email, 'cc')
                     m.setSubject('WineLookup:' + mparse.subject)
                     # get the message body by doing the message lookup
-                    m.setHtmlBody(wineutil.html_body_from_email_subject(mparse.subject, winesel_storelist, winereq_storelist))
+                    m.setHtmlBody(wineutil.html_body_from_email_subject(mparse.subject, winesel_storelist, winereq_storelist, debug=debug))
                     m.send()
                     logger.info('response emailed')
             except Exception as e:
@@ -185,20 +235,23 @@ if __name__ == '__main__':
         'bevmo',
         'hitime',
         'pavillions',
-        'totalwine',
+#        'totalwine',
         'wineclub',
         'wally',
+        'winex',
+        'ralphs',
     ]
 
     # (winerequest) request stores
     winereq_storelist = [
-        'winex',
+        'hiddenvine',
         'napacab',
-        'webwine',
+        'lawineco',
         'wineconn',
         'johnpete',
         'klwine',
         'nhliquor',
+        'rolf',
     ]
 
     # call the routine and get into the never ending loop

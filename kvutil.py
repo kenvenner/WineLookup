@@ -1,7 +1,7 @@
 '''
 @author:   Ken Venner
 @contact:  ken@venerllc.com
-@version:  1.21
+@version:  1.40
 
 Library of tools used in general by KV
 '''
@@ -18,8 +18,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # set the module version number
-AppVersion = '1.21'
-
+AppVersion = '1.40'
 
 # import ast
 #   and call bool(ast.literal_eval(value)) 
@@ -28,6 +27,9 @@ AppVersion = '1.21'
 #   expects options defined as key=value pair strings on the command line
 # input:
 #   optiondictconfig - key = variable, value = dict with keys ( value, type, descr, required )
+#   raise_error - bool flag - if true and we get a command line setting we don't know raise exception
+#   keymapdict - dictionary of misspelled command line values that are mapped to the official values
+#
 # return:
 #   optiondict - dictionary of values from config and command line
 #
@@ -46,76 +48,204 @@ AppVersion = '1.21'
 #     }
 # }
 #
-# optiondict = kv_parse_command_line( optiondictconfig )
+# keymapdict = {
+#     'working_dir' : 'workingdir',
+#     'dbg' : 'debug',
+# }
+#
+# optiondict = kv_parse_command_line( optiondictconfig, keymapdict=keymapdict )
 #
 #
-def kv_parse_command_line( optiondictconfig, debug=False ):
+def kv_parse_command_line( optiondictconfig, raise_error=False, keymapdict=None, debug=False ):
     # debug
     if debug:  print('kv_parse_command_line:sys.argv:', sys.argv)
     if debug:  print('kv_parse_command_line:optiondictconfig:', optiondictconfig)
-    
+    # debugging
+    logger.debug('LOAD(v%s)%s', AppVersion, '-'*40)
+    logger.debug('sys.argv: %s', sys.argv)
+    logger.debug('optiondictconfig: %s', optiondictconfig)
+
+    # default a set of basic config values - so we don't need to put them in each app
+    defaultdictconfig = {
+        'debug' : {
+            'value' : False,
+            'type'  : 'bool',
+            'description' : 'defines if we are running in debug mode',
+        },
+        'verbose' : {
+            'value' : 1,
+            'type'  : 'int',
+            'description' : 'defines the display level for print messages',
+        },
+        'dumpconfig' : {
+            'value' : False,
+            'type'  : 'bool',
+            'description' : 'defines if we will dump the final optiondict and exit',
+        },
+        'dumpconfigfile' : {
+            'value' : None,
+            'description' : 'defines the filename we dump the populated optiondict dictionary to as json',
+        },
+        'conf_json' : {
+            'value' : None,
+            'description' : 'defines the json file that houses configuration information',
+        },
+        'log_level' : {
+            'value' : 'INFO',
+            'type'  : 'inlist',
+            'valid' : ['DEBUG','INFO','WARNING','ERROR','CRITICAL'],
+            'description' : 'defines the overall logging level for all handlers',
+        },
+        'log_level_console' : {
+            'value' : 'INFO',
+            'type'  : 'inlist',
+            'valid' : ['DEBUG','INFO','WARNING','ERROR','CRITICAL'],
+            'description' : 'defines the logging level for console handlers',
+        },
+        'log_level_file' : {
+            'value' : 'INFO',
+            'type'  : 'inlist',
+            'valid' : ['DEBUG','INFO','WARNING','ERROR','CRITICAL'],
+            'description' : 'defines the logging level for file handlers',
+        },
+        'log_file'  : {
+            'value' : None,
+            'description' : 'defines the name of the log file',
+        },
+    }
+                
+        
     # create the dictionary - and populate values
     optiondict = {}
     for key in optiondictconfig:
         if 'value' in optiondictconfig[key]:
             # the user specified a value value
             optiondict[key] = optiondictconfig[key]['value']
+            # debugging
+            logger.debug('assigning [%s] value from optiondictconfig:%s', key, optiondict[key])
         else:
             # no value option - set to None
             optiondict[key] = None
 
-    # possibly add in here some logging attributes that we can pass in
-    # loglevel
-    # logfile
-    
     # read in the command line options that we care about
+    cmdlineargs = {}
     for argpos in range(1,len(sys.argv)):
         # get the argument and split it into key and value
         (key,value) = sys.argv[argpos].split('=')
 
         # debug
         if debug:  print('kv_parse_command_line:sys.argv[',argpos,']:',sys.argv[argpos])
+        logger.debug('sys.argv[%s]:%s',argpos,sys.argv[argpos])
 
         # skip this if the key is not populated
         if not key:
             if debug:  print('kv_parse_command_line:key-not-populated-skipping-arg')
+            logger.debug('key-not-populated-with-value-skipping-arg')
             continue
-        
+
+        # check to see if we should use the keymapping
+        if keymapdict:
+            if key in keymapdict and key not in optiondict and key not in defaultdictconfig:
+                logger.debug('remapping:%s:to:%s', key, keymapdict[key])
+                key = keymapdict[key]
+
+        # put this into cmdlineargs dictionary
+        cmdlineargs[key] = value
+
+    # see if we communicated the configuration file to read
+    conf_json_file = None
+    if 'conf_json' in cmdlineargs:
+        conf_json_file = cmdlineargs['conf_json']
+    elif 'conf_json' in optiondict and optiondict['conf_json']:
+        conf_json_file = optiondict['conf_json']
+    if conf_json_file:
+        with open( conf_json_file, 'r' ) as json_conf:
+            import json
+            confargs = json.load(json_conf)
+        for key,value in confargs.items():
+            if not key in cmdlineargs:
+                # value not overridden by value on commmand line
+                if isinstance( value, str ):
+                    # what we have is a string - which is the only thing we can read from the command line
+                    # stuff this into command line args
+                    cmdlineargs[key] = value
+                    logger.debug('conf_json key put into cmdlineargs:%s', key)
+                else:
+                    # this is other than a string - just set the optiondict value with it
+                    optiondict[key] = value
+                    logger.debug('conf_json key put into optiondict:%s', key)
+            else:
+                logger.debug('conf_json ignored because command line overrides it:%s', key)
+    
+
+    # now step through the configuration settings we have received
+    for key,value in cmdlineargs.items():
+        # logic to bring in "default/implied optiondict values if key passed is not part of app definition
+        if key not in optiondict and key in defaultdictconfig:
+            if debug:  print('kv_parse_command_line:key-not-in-optiondictconfig-but-in-defaultoptiondictconfig:', key)
+            logger.debug('key-not-in-optiondictconfig-but-in-defaultoptiondictconfig:%s', key)
+            # copy over this default into optiondict
+            optiondictconfig[key]= defaultdictconfig[key].copy()
+            # tag the defaultdictconfig that we used this key
+            defaultdictconfig['applied'] = True
+            # set the value
+            if 'value' in defaultdictconfig[key]:
+                optiondict[key] = defaultdictconfig[key]['value']
+            else:
+                optiondict[key] = None
+                
         # action on this command line
         if key in optiondict:
+            # debug message on type
+            if 'type' in optiondictconfig[key]:
+                if debug:  print('type:', optiondictconfig[key]['type'])
+                logger.debug('key:%stype:%s', key,optiondictconfig[key]['type'])
+                
             if 'type' not in optiondictconfig[key]:
                 # user did not specify the type of this option
                 optiondict[key] = value
                 if debug: print('type not in optiondictconfig[key]')
+                logger.debug('type not in optiondictconfig[key] for key:%s', key)
             elif optiondictconfig[key]['type'] == 'bool':
                 optiondict[key] = bool(strtobool(value))
-                if debug: print('type bool')
             elif optiondictconfig[key]['type'] == 'int':
                 optiondict[key] = int(value)
-                if debug: print('type int')
             elif optiondictconfig[key]['type'] == 'float':
                 optiondict[key] = float(value)
-                if debug: print('type float')
             elif optiondictconfig[key]['type'] == 'dir':
                 optiondict[key] = os.path.normpath(value)
-                if debug: print('type dir')
             elif optiondictconfig[key]['type'] == 'liststr':
                 optiondict[key] = value.split(',')
-                if debug: print('type liststr')
             elif optiondictconfig[key]['type'] == 'date':
                 optiondict[key] = datetime_from_str( value )
-                if debug: print('type date')
+            elif optiondictconfig[key]['type'] == 'inlist':
+                # value must be from a predefined list of acceptable values
+                if not 'valid' in optiondictconfig[key]:
+                    if debug: print('missing optiondictconfig setting [valid] for key:', key)
+                    logger.error('missing optiondictconfig setting [valid] for key:%s', key)
+                    raise Exception('missing optiondictconfig setting [valid] for key:%s', key)
+                if value not in optiondictconfig[key]['valid']:
+                    if debug:  print('value:', value, ':not in defined list of valid values:', optiondictconfig[key]['valid'])
+                    logger.error('invalid value passed in for [%s]:%s',key,value)
+                    logger.error('list of valid values are:%s',  optiondictconfig[key]['valid'])
+                    raise Exception('invalid value passed in for [%s]:%s',key,value)
+                optiondict[key] = value
             else:
                 # user set a type but we don't know what to do with this type
                 optiondict[key] = value
-                if debug: print('type not known')
+                if debug: print('type not known:', type)
+                logger.debug('type unknown:%s', type)
         elif key == 'help':
             # user asked for help - display help and then exit
             kv_parse_command_line_display( optiondictconfig, debug=False )
             sys.exit()
-        elif debug:
-            print('kv_parse_command_line:unknown-option:', key)
-
+        elif raise_error:
+            logger.error('unknown command line option:%s', key)
+            raise Exception('unknown command line option:%s', key)
+        else:
+            if debug:  print('kv_parse_command_line:unknown-option:', key)
+            logger.warning('unknown option:%s', key)
+            
     # test for required fields being populated
     missingoption = []
     for key in optiondictconfig:
@@ -130,15 +260,29 @@ def kv_parse_command_line( optiondictconfig, debug=False ):
         kv_parse_command_line_display( optiondictconfig, debug=False )
         errmsg = 'System exitted - missing required option(s):\n    ' + '\n    '.join(missingoption)
         # print('\n'.join(missingoption))
-        print('-'*80)
-        print(errmsg)
-        print('')
+        if debug:
+            print('-'*80)
+            print(errmsg)
+            print('')
+        logger.error(errmsg)
         raise Exception(errmsg)
         # sys.exit(1)
     
     # debug when we are done
     if debug:  print('kv_parse_command_line:optiondict:', optiondict)
+    logger.debug('optiondict:%s', optiondict)
 
+    # check to see if we want to dump the optiondict out to a file
+    if 'dumpconfigfile' in optiondict and optiondict['dumpconfigfile']:
+        dump_dict_to_json_file( optiondict['dumpconfigfile'], optiondict )
+        
+    # check to see if they set the dumpconfig setting if so display and exit
+    if 'dumpconfig' in optiondict and optiondict['dumpconfig']:
+        print('kv_parse_command_line:Dump configuration requested:')
+        for (key,val) in optiondict.items():
+            print('{}{}:{}'.format(key, '.'*(30-len(key)), val))
+        sys.exit()
+        
     # return what we created
     return optiondict
 
@@ -157,12 +301,14 @@ def kv_parse_command_line_display( optiondictconfig, optiondict={}, debug=False 
 
     # predefined number ranges by type
     nextcounter = {
-        'None' : 2,
-        'dir' : 100,
-        'int'  : 200,
-        'float' : 300, 
-        'bool' : 400,
-        'date' : 500,
+        'None'    : 2,
+        'dir'     : 100,
+        'int'     : 200,
+        'float'   : 300, 
+        'bool'    : 400,
+        'date'    : 500,
+        'liststr' : 600,
+        'inlist'  : 700,
     }        
 
     opt2sort = []
@@ -193,13 +339,33 @@ def kv_parse_command_line_display( optiondictconfig, optiondict={}, debug=False 
         else:
             print('option.:', opt)
 
-        for fld in ('value','required','description', 'error'):
+        for fld in ('value','required','description', 'valid', 'error'):
             if fld in optiondictconfig[opt]:
                 print('  ' + fld + '.'*(12-len(fld)) + ':', optiondictconfig[opt][fld])
         
 
+# define the filename used to create log files
+# that are based on the "day" the program starts running
+# generally used for short running tools
+# not used with tools that start and stay running
+def filename_log_day_of_month( filename, ext_override=None, path_override=None ):
+    file_path, base_filename, file_ext = filename_split( filename, path_blank=True )
+    if ext_override:
+            file_ext=ext_override
+    if file_ext[:1] != '.':
+        file_ext = '.' + file_ext
+    if path_override:
+        file_path = path_override
+    day_filename = '{}{:02d}'. format(base_filename, datetime.datetime.today().day)
+    logfilename = os.path.join(file_path, day_filename+file_ext)
+    if os.path.exists(logfilename):
+        if os.path.getmtime(logfilename) < (datetime.datetime.today() - datetime.timedelta(days=1)).timestamp():
+            # remove the file if it exists but has not been modified within the past 24 hours
+            remove_filename(logfilename)
+    return logfilename
 
 # return the filename that is max or min for a given query (UT)
+# default is to return the MIN filematch
 def filename_maxmin( file_glob, reverse=False ):
     # pull the list of files
     filelist = glob.glob( file_glob )
@@ -214,16 +380,73 @@ def filename_maxmin( file_glob, reverse=False ):
     return sorted(filelist, reverse=reverse )[0]
 
 # create a filename from part of a filename
-def filename_create( filename=None, filepath=None, filename_base=None, filename_ext=None ):
-    return True
+#   pull apart the filenaem passed in (if passed in) and then fill in the various file parts based
+#   on the other attributes passed in
+def filename_create( filename=None, filename_path=None, filename_base=None, filename_ext=None, path_blank=False ):
+    # pull apart the filename passed in
+    if filename:
+        file_path, base_filename, file_ext = filename_split( filename, path_blank=path_blank )
+    else:
+        file_path = base_filename = file_ext = ''
+    if filename_ext:
+            file_ext=filename_ext
+    if file_ext and file_ext[:1] != '.':
+        # put the dot into the extension
+        file_ext = '.' + file_ext
+    if filename_path:
+        file_path = filename_path
+    if filename_base:
+        base_filename = filename_base
+    if filename_path:
+        file_path = filename_path
+    elif path_blank:
+        file_path = ''
+    return os.path.normpath(os.path.join(file_path, base_filename+file_ext))
 
 # split up a filename into parts (path, basename, extension) (UT)
-def filename_split( filename ):
+def filename_split( filename, path_blank=False ):
     filename2, file_ext = os.path.splitext(filename)
     base_filename = os.path.basename(filename2)
-    file_path     = os.path.normpath(os.path.dirname(filename2))
+    if path_blank:
+        file_path = os.path.dirname(filename2)
+    else:
+        file_path     = os.path.normpath(os.path.dirname(filename2))
     return (file_path, base_filename, file_ext)
 
+
+# function to get back a full list of broken up file path
+def filename_splitall(path):
+    allparts = []
+    while 1:
+        parts = os.path.split(path)
+        if parts[0] == path:  # sentinel for absolute paths
+            allparts.insert(0, parts[0])
+            break
+        elif parts[1] == path: # sentinel for relative paths
+            allparts.insert(0, parts[1])
+            break
+        else:
+            path = parts[0]
+            allparts.insert(0, parts[1])
+    return allparts
+
+
+
+# create a list of filenames given a name, a list of names or a glob
+def filename_list( filename, filenamelist, fileglob, strippath=False ):
+    flist=[]
+    if fileglob:
+        flist=glob.glob(fileglob)
+    if filenamelist:
+        flist.extend(filenamelist)
+    if filename:
+        flist.append(filename)
+
+    if strippath:
+        for ndx in range(len(flist)):
+            flist[ndx] = os.path.basename(flist[ndx])
+
+    return flist
 
 # create a full filename and optionally validate directory exists and is writeabile (UT)
 def filename_proper( filename_full, dir=None, create_dir=False, write_check=False ):
@@ -245,18 +468,21 @@ def filename_proper( filename_full, dir=None, create_dir=False, write_check=Fals
             try:
                 os.makedirs( dir )
             except Exception as e:
-                print('kvutil:filename_proper:makedirs:%s' % e)
-                raise Exception('kvutil:filename_proper:makedirs:%s' % e)
+                if debug: print('kvutil:filename_proper:makedirs:%s' % e)
+                logger.error('makedirs:%s' % e)
+                raise Exception('kvutil:filename_proper:makedirs:%s', e)
         else:
             # needs to be created - option not enabled - raise an error
-            print('kvutil:filename_proper:directory does not exist:%s' % dir )
+            if debug: print('kvutil:filename_proper:directory does not exist:%s' % dir )
+            logger.error('directory does not exist:%s', dir )
             raise Exception('kvutil:filename_proper:directory does not exist:%s' % dir )
 
     # check to see if the directory is writeable if the flag is set
     if write_check:
         if not os.access( dir, os.W_OK ):
-            print('kvutil:filename_proper:directory is not writeable:%s' % dir )
-            raise('kvutil:filename_proper:directory is not writeable:%s' % dir )
+            if debug: print('kvutil:filename_proper:directory is not writeable:%s' % dir )
+            logger.error('directory is not writeable:%s', dir )
+            raise Exception('kvutil:filename_proper:directory is not writeable:%s' % dir )
     
     # build a full filename
     full_filename = os.path.join( dir, filename )
@@ -338,7 +564,8 @@ def filename_unique( filename=None, filename_href={} ):
 
     # check to see if we have and field issues
     if field_issues:
-        print('kvutil:filename_unique:missing values for:', ','.join(field_issues))
+        if debug:  print('kvutil:filename_unique:missing values for:', ','.join(field_issues))
+        logger.error('missing values for:%s', ','.join(field_issues))
         raise Exception('kvutil:filename_unique:missing values for:', ','.join(field_issues))
     
     # check that we have valid values
@@ -348,7 +575,8 @@ def filename_unique( filename=None, filename_href={} ):
 
     # check to see if we have and field issues
     if field_issues:
-        print('kvutil:filename_unique:invalid values for:', ','.join(field_issues))
+        if debug: print('kvutil:filename_unique:invalid values for:', ','.join(field_issues))
+        logger.error('invalid values for:%s', ','.join(field_issues))
         raise Exception('kvutil:filename_unique:invalid values for:', ','.join(field_issues))
 
     # create a filename if it does not exist
@@ -390,8 +618,9 @@ def filename_unique( filename=None, filename_href={} ):
 
         # test to see if we exceeded the max count and if so error out.
         if unique_counter >= default_options['maxcnt']:
-          print('kvutil:filename_unique:reached maximum count and not unique filename:', filename)
-          raise Exception('kvutil:filename_unique:reached maximum count and not unique filename:', filename)
+            if debug: print('kvutil:filename_unique:reached maximum count and not unique filename:', filename)
+            logger.error('reached maximum count and not unique filename:%d:%s', unique_counter, filename)
+            raise Exception('kvutil:filename_unique:reached maximum count and not unique filename:', filename)
 
     # debugging
     #print('file_unique:filename:final:', filename)
@@ -401,7 +630,24 @@ def filename_unique( filename=None, filename_href={} ):
 #, \
 #           filename_proper( filename +  default_options['ov_ext'], dir=default_options['file_path'])
                                                                                           
-  
+
+# cloudpath - create an absolute path to a folder that is local for cloud drive
+def cloudpath( filepath, filename='' ):
+    userdir = ''
+    if filepath == None:
+        filepath = ''
+    if filename == None:
+        filename = ''
+    # determine if the path is a cloud path
+    for cloudprovider in ('Box Sync','Dropbox','OneDrive'):
+        index = filepath.find(cloudprovider)
+        if index != -1:
+            filepath = filepath[index:]
+            userdir = os.path.expanduser('~')
+            break
+
+    return os.path.abspath(os.path.join(userdir,filepath,filename)) 
+            
 
 # read a text file into a string (UT)
 def slurp( filename ):
@@ -409,17 +655,25 @@ def slurp( filename ):
         return t.read()
 
 # read in a file and create a list of each populated line (UT)
-def read_list_from_file_lines( filename, stripblank=False ):
+def read_list_from_file_lines( filename, stripblank=False, trim=False, encoding=None ):
     # read in the file as a list of strings
-    with open( filename, 'r') as t:
-        filelist = t.readlines()
+    if encoding:
+        with open( filename, 'r', encoding=encoding) as t:
+            filelist = t.readlines()
+    else:
+        with open( filename, 'r') as t:
+            filelist = t.readlines()
 
     # strip the trailing \n
     filelist = [line.strip('\n') for line in filelist]
     
+    # strip the trailing \n
+    if trim:
+        filelist = [line.strip() for line in filelist]
+    
     # if they want to strip blank lines
     if stripblank:
-        filelist = [line for line in filelist if line]
+        filelist = [line for line in filelist if line and line.strip()]
         
     # return the list of lines
     return filelist
@@ -430,58 +684,67 @@ def read_list_from_file_lines( filename, stripblank=False ):
 # time for the OS to release the blocking issue and then delete
 #
 # optional input:
-#    callfrom - string used to display - usually the name of module.function()
+#    calledfrom - string used to display - usually the name of module.function()
 #    debug - bool defines if we display duggging print statements
 #    maxretry - int - number of times we try to delete and then give up (default: 20)
 #
-def remove_filename(filename,callfrom='',debug=False,maxretry=20):
+def remove_filename(filename,calledfrom='',debug=False,maxretry=20):
+    logger.debug('remove:%s:calledfrom:%s:maxretry:%d',filename,calledfrom,maxretry)
     cnt=0
-    if callfrom:  callfrom += ':'
+    if calledfrom:  calledfrom += ':'
     while os.path.exists(filename):
         cnt += 1
-        if debug: print(callfrom, filename, ':exists:try to remove:cnt:', cnt)
+        if debug: print(calledfrom, filename, ':exists:try to remove:cnt:', cnt)
+        logger.debug('%s:%s:exists:try to remove:cnt:%d', calledfrom, filename, cnt)
         try:
             os.remove(filename) # try to remove it directly
-#        except OSError as e: # originally just checked for OSError - we now check for all exceptions`
+            logger.debug('%s:%s:removed on count:%d',calledfrom, filename, cnt)
         except Exception as e:
-            if debug: print(callfrom, 'errno:', e.errno, ':ENOENT:', errno.ENOENT)
+            if debug: print(calledfrom, 'errno:', e.errno, ':ENOENT:', errno.ENOENT)
+            logger.debug('%s:errno:%d:ENOENT:%d', calledfrom, e.errno, errno.ENOENT)
             if e.errno == errno.ENOENT: # file doesn't exist
                 return
-            if debug: print(callfrom, filename,':', str(e))
+            if debug: print(calledfrom, filename,':', str(e))
             if cnt > maxretry:
-                print(callfrom, filename, ':raise error - exceed maxretry attempts:', maxretry)
+                if debug: print(calledfrom, filename, ':raise error - exceed maxretry attempts:', maxretry)
+                logger.error('%s:%s:exceeded maxretry attempts:%d:raise error', calledfrom, filename, maxretry)
                 raise e
         except WinError as f:
-            print('catch WinError:', str(f))
+            if debug: print('catch WinError:', str(f))
+            logger.warning('catch WinError:%s', str(f))
 
 # utility used to remove a folder - in windows sometimes we have a delay
 # in releasing the filehandle - this routine will loop a few times giving
 # time for the OS to release the blocking issue and then delete
 #
 # optional input:
-#    callfrom - string used to display - usually the name of module.function()
+#    calledfrom - string used to display - usually the name of module.function()
 #    debug - bool defines if we display duggging print statements
 #    maxretry - int - number of times we try to delete and then give up (default: 20)
 #
-def remove_dir(dirname,callfrom='',debug=False,maxretry=20):
+def remove_dir(dirname,calledfrom='',debug=False,maxretry=20):
     cnt=0
-    if callfrom:  callfrom += ':'
+    if calledfrom:  calledfrom += ':'
     while os.path.exists(dirname):
         cnt += 1
-        if debug: print(callfrom, dirname, ':exists:try to remove:cnt:', cnt)
+        if debug: print(calledfrom, dirname, ':exists:try to remove:cnt:', cnt)
         try:
             os.rmdir(dirname) # try to remove it directly
 #        except OSError as e: # originally just checked for OSError - we now check for all exceptions`
         except Exception as e:
-            if debug: print(callfrom, 'errno:', e.errno, ':ENOENT:', errno.ENOENT)
+            if debug: print(calledfrom, 'errno:', e.errno, ':ENOENT:', errno.ENOENT)
+            logger.debug('%s:errno:%s:ENOENT:%s', calledfrom, e.errno, errno.ENOENT)
             if e.errno == errno.ENOENT: # file doesn't exist
                 return
-            if debug: print(callfrom, dirname,':', str(e))
+            if debug: print(calledfrom, dirname,':', str(e))
+            logger.debug('%s:%s:%s', calledfrom, dirname, str(e))
             if cnt > maxretry:
-                print(callfrom, dirname, ':raise error - exceed maxretry attempts:', maxretry)
+                if debug: print(calledfrom, dirname, ':raise error - exceed maxretry attempts:', maxretry)
+                logger.error('%s:%s:maxretry attempts:%d', calledfrom, dirname, maxretry)
                 raise e
         except WinError as f:
-            print('catch WinError:', str(f))
+            if debug: print('catch WinError:', str(f))
+            logger.warning('catch WinError:%s', str(f))
 
 
 # extract out a datetime value from a string if possible
@@ -491,7 +754,7 @@ def remove_dir(dirname,callfrom='',debug=False,maxretry=20):
 #  YYYY-MM-DD
 #  YYYYMMDD
 #
-def datetime_from_str( value ):
+def datetime_from_str( value, skipblank=False ):
     import re
     datefmts = (
         ( re.compile('\d{1,2}\/\d{1,2}\/\d\d$'), '%m/%d/%y' ),
@@ -502,11 +765,19 @@ def datetime_from_str( value ):
         ( re.compile('^\d{8}$'), '%Y%m%d' ),
     )
 
+    if skipblank and not value:
+        return value
+    
     for (redate, datefmt) in datefmts:
         if redate.match(value):
             return datetime.datetime.strptime(value, datefmt)
 
-    raise
+    raise Exception('Unable to convert to date time:%s', value)
+
+
+# return the function name of the function that called this
+def functionName(callBackNumber=1):
+    return sys._getframe(callBackNumber).f_code.co_name
 
 
 
@@ -571,4 +842,11 @@ def scriptinfo():
                "dir": scriptdir}
     return scr_dict
 
+
+#utility used to dump a dictionary to a file in json format
+def dump_dict_to_json_file( filename, optiondict ):
+    import json
+    with open( filename, 'w' ) as json_out:
+        json.dump( optiondict, json_out )
+        
 # eof
