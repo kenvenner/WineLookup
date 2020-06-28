@@ -1,7 +1,7 @@
 '''
 @author:   Ken Venner
 @contact:  ken@venerllc.com
-@version:  1.10
+@version:  1.11
 
 Library of tools used read in and process gmail mailbox
 '''
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 debug = False
 
 # version number
-AppVersion = '1.10'
+AppVersion = '1.11'
 
 # todo
 # 1) we have a possible problem with creating a unique directory based on msgid - need to determine if we want to fix
@@ -59,8 +59,9 @@ def init( email_setting ):
     logger.info('init:start')
     
     # capture the debugging flag
-    if 'imap_debug' in email_setting.keys():
+    if 'imap_debug' in email_setting.keys() and email_setting['imap_debug']:
         verbose = email_setting['imap_debug']
+        logger.info('init:imap_debug set')
         
     # check that we have the required values set
     missing_count = 0
