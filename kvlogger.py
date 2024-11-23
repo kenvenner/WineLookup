@@ -1,20 +1,21 @@
 '''
 @author:   Ken Venner
 @contact:  ken@venerllc.com
-@version:  1.02
+@version:  1.06
 
 Library of tools used to manage logging
 '''
 
-
 import logging
 import logging.config
 
+import os
 import sys
 from logging.handlers import TimedRotatingFileHandler
 
 FORMATTER = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s:%(lineno)d - %(message)s")
 LOG_FILE = "my_app.log"
+
 
 # Add to your code
 # my_logger = get_logger("my module name")
@@ -25,15 +26,18 @@ def get_console_handler():
     console_handler.setFormatter(FORMATTER)
     return console_handler
 
+
 def get_file_handler(logfile=LOG_FILE):
     file_handler = TimedRotatingFileHandler(LOG_FILE, when='midnight')
     file_handler.setFormatter(FORMATTER)
     return file_handler
 
-def get_logger(logger_name, logfile=LOG_FILE):
+
+def get_logger(logger_name, logfile=LOG_FILE, loggerlevel=None):
     logger = logging.getLogger(logger_name)
 
-    logger.setLevel(logging.DEBUG) # better to have too much log than not enough
+    if loggerlevel is not None:
+        logger.setLevel(loggerlevel)  # better to have too much log than not enough
 
     logger.addHandler(get_console_handler())
     logger.addHandler(get_file_handler(logfile))
@@ -44,7 +48,16 @@ def get_logger(logger_name, logfile=LOG_FILE):
     return logger
 
 
-def get_config(log_path=LOG_FILE, fhandler='logging.handlers.RotatingFileHandler', loggerlevel='INFO'):
+def get_config(log_path=LOG_FILE,
+               fhandler='logging.handlers.RotatingFileHandler',
+               loggerlevel=None,
+               maxBytes=None):
+    if maxBytes is None:
+        maxBytes = 1024 * 1000 * 100
+
+    if loggerlevel is None:
+        loggerlevel = 'DEBUG'
+
     config = {
         'disable_existing_loggers': False,
         'version': 1,
@@ -52,7 +65,7 @@ def get_config(log_path=LOG_FILE, fhandler='logging.handlers.RotatingFileHandler
             'default': {
                 'format': '%(asctime)s %(levelname)s %(name)s:%(lineno)d %(funcName)s %(message)s',
             },
-            'short' : {
+            'short': {
                 'format': '%(asctime)s %(levelname)s %(name)s %(levelname)s:%(lineno)d: %(message)s'
             },
         },
@@ -64,11 +77,12 @@ def get_config(log_path=LOG_FILE, fhandler='logging.handlers.RotatingFileHandler
                 'stream': 'ext://sys.stdout'
             },
             'file': {
-                'level': 'DEBUG',
+                'level': loggerlevel,
                 'class': fhandler,
                 'formatter': 'default',
                 'filename': log_path,
-                'maxBytes': 1024*1000,
+                'encoding': 'UTF-8',
+                'maxBytes': maxBytes,
                 'backupCount': 3
             }
         },
@@ -79,28 +93,42 @@ def get_config(log_path=LOG_FILE, fhandler='logging.handlers.RotatingFileHandler
             },
         },
     }
-    if fhandler=='logging.handlers.TimedRotatingFileHandler':
+    if fhandler == 'logging.handlers.TimedRotatingFileHandler':
         config['handlers']['file']['when'] = 'midnight'
         # config['handlers']['file']['interval'] = 1
         config['handlers']['file']['backupCount'] = 31
         del config['handlers']['file']['maxBytes']
-    elif fhandler=='logging.FileHandler':
-        #config['handlers']['file']['mode'] = 'a'
-        #config['handlers']['file']['delay'] = False
+    elif fhandler == 'logging.FileHandler':
+        # config['handlers']['file']['mode'] = 'a'
+        # config['handlers']['file']['delay'] = False
         del config['handlers']['file']['maxBytes']
         del config['handlers']['file']['backupCount']
-        
+
     return config
 
-def setHandlerLevel( dictConfig, handlerType, level):
+
+def setHandlerLevel(dictConfig, handlerType, level):
     dictConfig['handlers'][handlerType] = level
 
-def dictConfig( config ):
+
+def dictConfig(config):
     logging.config.dictConfig(config)
 
 
-def getLogger( name ):
-    return logging.getLogger( name )
+def getLogger(name):
+    return logging.getLogger(name)
+
+
+def clear_logs(config, logger):
+    log_file = config['handlers']['file']['filename']
+    logging.shutdown()
+    os.remove(log_file)
+    dictConfig(config)
+    logger.info('Logs cleared at startup: %s', log_file)
+
+
+"""
+Commented out this code block
 
 # Capturing Traceback informatoin in your logs and JSON payload logging pointers
 # https://www.datadoghq.com/blog/python-logging-best-practices/
@@ -114,3 +142,5 @@ def handle_exception(exc_type, exc_value, exc_traceback):
     logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
 
 sys.excepthook = handle_exception
+
+"""

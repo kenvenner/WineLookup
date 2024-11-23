@@ -6,7 +6,6 @@
 Library of tools used send out message through gmail
 '''
 
-
 from email import encoders
 from email.mime.audio import MIMEAudio
 from email.mime.base import MIMEBase
@@ -21,6 +20,7 @@ import sys
 
 # logging
 import logging
+
 logger = logging.getLogger(__name__)
 
 # version number
@@ -34,6 +34,7 @@ class GmailSend:
     HTML messages.  The code comes from various places around
     the net and from my own brain.
     """
+
     def __init__(self, sendfrom: str, sendpass: str):
         """
         Create a new empty email sending message object.
@@ -44,7 +45,8 @@ class GmailSend:
         @param sendpass: the password of the account being used to send the email
         @type smtpServer: String
         """
-        self._reEmail = re.compile("^([\\w \\._]+\\<[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\>|[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)$")
+        self._reEmail = re.compile(
+            "^([\\w \\._]+\\<[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\>|[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)$")
 
         if not self.validateEmailAddress(sendfrom):
             raise Exception("Invalid email address '%s'" % sendfrom)
@@ -57,7 +59,7 @@ class GmailSend:
         self._subject = ""
         self.clearRecipients()
         self.clearAttachments()
-    
+
     def send(self):
         """
         Send the email message represented by this object.
@@ -65,9 +67,9 @@ class GmailSend:
         # Validate message
         if self._textBody is None and self._htmlBody is None:
             raise Exception("Error! Must specify at least one body type (HTML or Text)")
-        if len(self._to)+len(self._cc)+len(self._bcc) == 0:
+        if len(self._to) + len(self._cc) + len(self._bcc) == 0:
             raise Exception("Must specify at least one recipient (to,cc,bcc)")
-        
+
         # Create the message part
         if self._textBody is not None and self._htmlBody is None:
             msg = MIMEText(self._textBody, "plain")
@@ -82,12 +84,12 @@ class GmailSend:
             tmpmsg = msg
             msg = MIMEMultipart()
             msg.attach(tmpmsg)
-        for fname,attachname in self._attach:
+        for fname, attachname in self._attach:
             if not os.path.exists(fname):
-                print( "File '%s' does not exist.  Not attaching to email." % fname )
+                print("File '%s' does not exist.  Not attaching to email." % fname)
                 continue
             if not os.path.isfile(fname):
-                print( "Attachment '%s' is not a file.  Not attaching to email." % fname )
+                print("Attachment '%s' is not a file.  Not attaching to email." % fname)
                 continue
             # Guess at encoding type
             ctype, encoding = mimetypes.guess_type(fname)
@@ -127,7 +129,7 @@ class GmailSend:
         if self._replyto:
             msg['Reply-to'] = self._replyto
         # address prep
-        sendtolist=[]
+        sendtolist = []
         if self._to:
             msg['To'] = ", ".join(self._to)
             sendtolist.extend(self._to)
@@ -138,20 +140,20 @@ class GmailSend:
             sendtolist.extend(self._bcc)
         msg.preamble = "You need a MIME enabled mail reader to see this message"
         # Send message
-        smtp = smtplib.SMTP(host="smtp.gmail.com", port= 587)
+        smtp = smtplib.SMTP(host="smtp.gmail.com", port=587)
         smtp.ehlo()
         smtp.starttls()
         smtp.login(self._sendfrom, self._sendpass)
         smtp.ehlo()
         smtp.sendmail(self._sendfrom, sendtolist, msg.as_string())
         smtp.close()
-    
+
     def setSubject(self, subject):
         """
         Set the subject of the email message.
         """
         self._subject = subject
-    
+
     def setFrom(self, address):
         """
         Set the message header for email sender (defaults to 'sendfrom').
@@ -159,7 +161,7 @@ class GmailSend:
         if not self.validateEmailAddress(address):
             raise Exception("Invalid email address '%s'" % address)
         self._from = address
-    
+
     def setReplyTo(self, address):
         """
         Set the email message reply to email address.
@@ -167,7 +169,7 @@ class GmailSend:
         if not self.validateEmailAddress(address):
             raise Exception("Invalid email address '%s'" % address)
         self._replyto = address
-    
+
     def clearRecipients(self, addrtype=None):
         """
         Remove all currently defined recipients for
@@ -182,7 +184,7 @@ class GmailSend:
             self._cc = []
         if addrtype is None or addrtype.lower() == 'bcc':
             self._bcc = []
-        
+
     def addRecipient(self, address: str, addrtype='to'):
         """
         Add a new recipient to the email message.
@@ -193,13 +195,13 @@ class GmailSend:
         """
         if not self.validateEmailAddress(address):
             raise Exception("Invalid email address '%s'" % address)
-        if addrtype.lower()=='to':
+        if addrtype.lower() == 'to':
             self._to.append(address)
-        elif addrtype.lower()=='cc':
+        elif addrtype.lower() == 'cc':
             self._cc.append(address)
         else:
             self._bcc.append(address)
-    
+
     def addRecipients(self, addresses: list, addrtype='to'):
         """
         Add a list new recipient to the email message.
@@ -210,19 +212,19 @@ class GmailSend:
         """
         for address in addresses:
             self.addRecipient(address, addrtype)
-    
+
     def setTextBody(self, body):
         """
         Set the plain text body of the email message.
         """
         self._textBody = body
-    
+
     def setHtmlBody(self, body):
         """
         Set the HTML portion of the email message.
         """
         self._htmlBody = body
-    
+
     def clearBody(self, type=None):
         """
         Clear the email message body
@@ -236,13 +238,13 @@ class GmailSend:
             self._textBody = None
         if type is None or type.lower() == 'html':
             self._htmlBody = None
-    
+
     def clearAttachments(self):
         """
         Remove all file attachments.
         """
         self._attach = []
-    
+
     def addAttachment(self, fname: str, attachname=None):
         """
         Add a file attachment to this email message.
@@ -258,8 +260,8 @@ class GmailSend:
         """
         if fname is None:
             return
-        self._attach.append( (fname, attachname) )
-    
+        self._attach.append((fname, attachname))
+
     def validateEmailAddress(self, address: str):
         """
         Validate the specified email address.
@@ -270,11 +272,14 @@ class GmailSend:
         if self._reEmail.search(address) is None:
             return False
         return True
-    
+
+
 if __name__ == "__main__":
     # Run some tests
     import kvutil
-    optiondict = kvutil.kv_parse_command_line( {"email_user": {}, "email_password": {}, "conf_json":{"value": "gmail-wines.json"}}, debug=False )
+
+    optiondict = kvutil.kv_parse_command_line(
+        {"email_user": {}, "email_password": {}, "conf_json": {"value": "gmail-wines.json"}}, debug=False)
     fromaddr = optiondict['email_user']
     password = optiondict['email_password']
     mFrom = "Test User <test@mydomain.com>"
@@ -283,13 +288,12 @@ if __name__ == "__main__":
     # create the sending mail object
     m = GmailSend(fromaddr, password)
     m.addRecipient(mTo)
-    
-    
+
     # Simple Plain Text Email
     m.setSubject("Plain text email")
     m.setTextBody("This is a plain text email <b>I should not be bold</b>")
     m.send()
-    
+
     # Plain text + attachment
     m.setSubject("Text plus attachment")
     m.addAttachment('winetodayattune.csv')
@@ -306,7 +310,7 @@ if __name__ == "__main__":
     m.setSubject("HTML plus attachment")
     m.addAttachment('winetodayattune.csv')
     m.send()
-    
+
     # Text + HTML
     m.clearAttachments()
     m.clearBody()
@@ -314,7 +318,7 @@ if __name__ == "__main__":
     m.setTextBody("You should not see this text in a MIME aware reader")
     m.setHtmlBody("The following should be <b>bold</b>")
     m.send()
-    
+
     # Text + HTML + attachment
     m.setSubject("HTML + Text + attachment")
     m.addAttachment('winetodayattune.csv')
@@ -333,7 +337,7 @@ if __name__ == "__main__":
     m.setSubject("Text Email + Cc Only")
     m.setTextBody("This is a plain text email <b>I should not be bold</b>")
     m.send()
-    
+
     # Simple Text BCC only Email
     m.clearAttachments()
     m.clearRecipients()
@@ -342,7 +346,6 @@ if __name__ == "__main__":
     m.setSubject("Text Email + Bcc Only")
     m.setTextBody("This is a plain text email <b>I should not be bold</b>")
     m.send()
-
 
     # Simple Text BCC only Email
     m.clearAttachments()
@@ -354,5 +357,4 @@ if __name__ == "__main__":
     m.setTextBody("This is a plain text email <b>I should not be bold</b>")
     m.send()
 
-
-#eof
+# eof
